@@ -15,7 +15,12 @@ try:
     HAS_TRAY=True
 except: HAS_TRAY=False
 
-SPRITE_DIR = pathlib.Path(__file__).parent.parent / "assets" / "sprites"
+def _base():
+    if getattr(sys, 'frozen', False):
+        return pathlib.Path(sys._MEIPASS)  # type: ignore
+    return pathlib.Path(__file__).parent.parent
+SPRITE_DIR = _base() / "assets" / "sprites"
+MEOW_WAV = _base() / "assets" / "meow.wav"
 
 def main():
     print(f"Sprite dir: {SPRITE_DIR} exists={SPRITE_DIR.exists()}")

@@ -1,6 +1,12 @@
-import json, pathlib, time, datetime
-
-MEM_PATH = pathlib.Path(__file__).parent.parent / "assets" / "kitten_memory.json"
+import json, pathlib, time, datetime, sys, os
+def _mem_base():
+    # writable location: AppData for exe, assets for dev
+    if getattr(sys, 'frozen', False):
+        d = pathlib.Path(os.getenv("APPDATA", str(pathlib.Path.home()))) / "TaskbarKitten"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "kitten_memory.json"
+    return pathlib.Path(__file__).parent.parent / "assets" / "kitten_memory.json"
+MEM_PATH = _mem_base()
 
 DEFAULT = {
     "name": None,

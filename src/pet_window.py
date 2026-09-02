@@ -46,7 +46,14 @@ class PetWindow:
 
         # position
 
-        self._pos_file = pathlib.Path(__file__).parent.parent / "assets" / "kitten_pos.txt"
+        # writable pos file (AppData for exe)
+        import sys as _sys, os as _os
+        if getattr(_sys, 'frozen', False):
+            _d = pathlib.Path(_os.getenv("APPDATA", str(pathlib.Path.home()))) / "TaskbarKitten"
+            _d.mkdir(parents=True, exist_ok=True)
+            self._pos_file = _d / "kitten_pos.txt"
+        else:
+            self._pos_file = pathlib.Path(__file__).parent.parent / "assets" / "kitten_pos.txt"
 
         # migrate from memory if exists
 
@@ -2110,7 +2117,10 @@ class PetWindow:
         def _do():
             try:
                 import pathlib, winsound
-                wav = pathlib.Path(__file__).parent.parent / "assets" / "meow.wav"
+                # frozen exe: assets in _MEIPASS, else dev assets
+                import sys as _sys
+                base = pathlib.Path(_sys._MEIPASS) if getattr(_sys, 'frozen', False) else pathlib.Path(__file__).parent.parent  # type: ignore
+                wav = base / "assets" / "meow.wav"
                 if wav.exists():
                     try:
                         winsound.PlaySound(str(wav), winsound.SND_FILENAME | winsound.SND_ASYNC)
