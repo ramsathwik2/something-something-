@@ -2116,30 +2116,33 @@ class PetWindow:
             print("muted"); return
         def _do():
             try:
-                import pathlib, winsound
-                # frozen exe: assets in _MEIPASS, else dev assets
+                import pathlib
                 import sys as _sys
                 base = pathlib.Path(_sys._MEIPASS) if getattr(_sys, 'frozen', False) else pathlib.Path(__file__).parent.parent  # type: ignore
-                wav = base / "assets" / "meow.wav"
-                if wav.exists():
+                mp3 = base / "assets" / "cat-purr-meow.mp3"
+                if not mp3.exists():
+                    mp3 = pathlib.Path(r"F:\edr-cat-purr-meow-8327.mp3")
+                # prefer pygame for MP3, fallback to winsound
+                played=False
+                try:
+                    import pygame  # type: ignore
+                    if not pygame.mixer.get_init():
+                        pygame.mixer.init()
+                    pygame.mixer.music.load(str(mp3))
+                    pygame.mixer.music.play()
+                    played=True
+                except: pass
+                if not played:
                     try:
-                        winsound.PlaySound(str(wav), winsound.SND_FILENAME | winsound.SND_ASYNC)
-                    except:
-                        winsound.Beep(880, 110); winsound.Beep(1046, 140)
-                else:
-                    if kind=="purr":
-                        for f in (72,68,65,70,68,65):
-                            try: winsound.Beep(f, 70)
-                            except: __import__('time').sleep(0.07)
-                            __import__('time').sleep(0.025)
-                        try: winsound.Beep(60, 90)
-                        except: pass
-                    elif kind=="chirp":
-                        winsound.Beep(1350, 70); winsound.Beep(1680, 90)
-                    else:
-                        winsound.Beep(880, 110); winsound.Beep(1046, 140)
+                        import winsound
+                        winsound.PlaySound(str(mp3), winsound.SND_FILENAME | winsound.SND_ASYNC)
+                        played=True
+                    except: pass
+                if not played:
+                    import winsound
+                    winsound.Beep(880, 110); winsound.Beep(1046, 140)
             except: pass
-            print(f"sound {kind}")
+            print(f"sound {kind} meow mp3")
         import threading
         threading.Thread(target=_do, daemon=True).start()
 
