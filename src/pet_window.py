@@ -207,6 +207,7 @@ class PetWindow:
         self.root.after(2200, self.curious_check)
 
         self.root.after(2500, self.food_check)
+        self.root.after(2800, self.arch_check)
 
         self.root.after(900, self.ask_name_if_needed)
 
@@ -1592,10 +1593,13 @@ class PetWindow:
     }
 
     FOOD_WORDS = {w.strip().lower() for w in FOOD_WORDS if w.strip()}
-
-    # single-word index for fuzzy token matching
-
     FOOD_SINGLE = {w for w in FOOD_WORDS if " " not in w}
+
+    # architecture search triggers motivational quote on any browser
+    ARCH_SEARCH_WORDS = {
+        "architecture","architect","autocad","revit","rhino","sketchup","archicad","lumion","twinmotion","vray","v-ray","enscape","blueprint","floor plan","elevation","section","facade","render","3d model","bim","parametric","studio","studio project","site plan","masterplan"
+    }
+    ARCH_SEARCH_WORDS = {w.strip().lower() for w in ARCH_SEARCH_WORDS if w.strip()}
 
 
 
@@ -1617,9 +1621,21 @@ class PetWindow:
 
 
 
-    def _lev(self, a,b):
+    def _is_arch_search(self):
+        try:
+            hwnd=ctypes.windll.user32.GetForegroundWindow()
+            length=ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buff=ctypes.create_unicode_buffer(length+1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buff, length+1)
+            title=(buff.value or "").lower()
+            if not title: return False, ""
+            for w in self.ARCH_SEARCH_WORDS:
+                if w in title:
+                    return True, w
+            return False, ""
+        except: return False, ""
 
-        # tiny Levenshtein for fuzzy typo (biriyani vs biryani)
+    def _lev(self, a,b):
 
         if a==b: return 0
 
@@ -1790,6 +1806,25 @@ class PetWindow:
             print("food err",e)
 
         self.root.after(1200, self.food_check)
+
+    def arch_check(self):
+        try:
+            now=time.time()
+            if now - getattr(self,'_last_arch',0) > 35:
+                is_arch, word = self._is_arch_search()
+                if is_arch and word != getattr(self,'_last_arch_word',None):
+                    self._last_arch=now; self._last_arch_word=word
+                    print(f"arch google '{word}' -> motivational quote")
+                    idx=self.memory.get("luck_message_index",0)
+                    msg=self.LUCK_MESSAGES[idx % len(self.LUCK_MESSAGES)]
+                    self.memory["luck_message_index"]=(idx+1)%len(self.LUCK_MESSAGES); mem.save(self.memory)
+                    self._show_bubble(msg, 6000)
+                    if not self.is_duck and not self.walk_active:
+                        self.animator.set_state("watching", big=False, flip=False)
+                        self.root.after(3200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active else None)
+        except Exception as e:
+            print("arch err",e)
+        self.root.after(1600, self.arch_check)
 
 
 
