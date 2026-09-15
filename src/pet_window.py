@@ -1976,27 +1976,25 @@ class PetWindow:
             mem.save(self.memory)
 
             try:
-
                 self.menu.entryconfig(4, label=f"Pet {name} <3")
-
             except: pass
-
             try:
-
                 self.root.title(name)
-
             except: pass
-
-            print(f"Named kitten {name}")
-
+            # also update tray icon title/menu if exists
             try:
-
-                dlg.destroy()
-
+                if hasattr(self, "tray_icon") and self.tray_icon:
+                    self.tray_icon.title = f"{name} - Taskbar Kitten"
+                    # tray menu will update next time via app.py callback, but force refresh
+                    try:
+                        self.tray_icon.update_menu()
+                    except: pass
             except: pass
-
+            print(f"Named kitten {name}")
+            try:
+                dlg.destroy()
+            except: pass
             self._show_bubble(f"Hi, I'm {name}! <3", 5000)
-
             self._name_pending=False
 
         # pink button #FF8FA3 hover, paw emoji, shadow
@@ -2374,19 +2372,14 @@ class PetWindow:
 
                     x=14
 
-                _, y = calc_position(self.pet_w, self.pet_h, self.placement)
-
-                self.root.geometry(f"{self.pet_w}x{self.pet_h}+{x}+{y}")
-
-                self.walk_x=x; self._save_pos()
-
+                # fix drift: don't teleport while sleeping, just bubble + watch
                 self.animator.set_state("watching", big=False, flip=False)
 
                 self._show_bubble("waiting for you…", 3800)
 
-                print("🪟 waiting for you by the edge")
+                print("waiting bubble only - no drift while sleeping")
 
-                self.root.after(6000, lambda: self.animator.set_state("sleeping", big=False, flip=False))
+                self.root.after(6000, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
 
         except: pass
 

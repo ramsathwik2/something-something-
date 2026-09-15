@@ -67,6 +67,7 @@ def main():
                 pystray.MenuItem("Quit", on_quit)
             )
             icon = pystray.Icon("Kitty", img, f"{n} - Taskbar Kitten", menu)
+            pet.tray_icon = icon
             icon.run()
         threading.Thread(target=tray_thread, daemon=True).start()
         print(f"Tray started for {pet.kitten_name or 'Kitten'}.")
