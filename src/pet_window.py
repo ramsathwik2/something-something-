@@ -2776,16 +2776,12 @@ class PetWindow:
         tk.Label(hdr, text=pretty_today, bg="#FFFCF7", fg="#8B7355", font=("Georgia", 9, "italic")).pack(side="left")
         wc_var=tk.StringVar(value="0 words")
         tk.Label(hdr, textvariable=wc_var, bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 7)).pack(side="right")
-        # paper lines
         paper=tk.Frame(right, bg="white")
         paper.pack(fill="both", expand=True, padx=8, pady=4)
-        # canvas for lines behind text
-        line_canvas=tk.Canvas(paper, bg="white", highlightthickness=0, bd=0, height=1)
-        line_canvas.pack(fill="x")
-        # text with paper color and subtle lines via spacing
-        txt=tk.Text(paper, bg="white", fg="#3a2a1a", font=("Segoe UI", 11), wrap="word", bd=0, padx=12, pady=10, undo=True, spacing1=4, spacing3=8, insertbackground="#8B4513")
+        txt=tk.Text(paper, bg="white", fg="#3a2a1a", font=("Segoe UI", 11), wrap="word", bd=0, padx=12, pady=10, undo=True, spacing1=4, spacing3=8, insertbackground="#8B4513", state="normal", takefocus=1)
         txt.pack(fill="both", expand=True)
         txt.configure(highlightthickness=1, highlightbackground="#E6D5B8")
+        txt.focus_force()
         # subtle horizontal rules overlay (via canvas lines behind text is complex, so add tag)
         def update_wc(e=None): 
             words=len(txt.get("1.0", tk.END).split())
