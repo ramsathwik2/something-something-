@@ -75,6 +75,8 @@ def main():
     print(f"=== {pet.kitten_name or 'Kitten'} is ready ===")
     print(" - Sound: purr on pet, chirp on wake (tray Mute to toggle)")
     print(f" - Our story: days, pets, apart. Pet count {pet.memory.get('petCount',0)}")
+    if os.environ.get("KITTY_OPEN_JOURNAL") == "1" or "--open-journal" in sys.argv:
+        pet.root.after(2500, pet.show_journal)
     pet.run()
     mon.stop()
     print("Exited")

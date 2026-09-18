@@ -1,10 +1,22 @@
-import tkinter as tk
+﻿import tkinter as tk
+
+import ctypes, pathlib, random, time, json, datetime
+
+import logging
+_LOGGER=logging.getLogger("madhu")
+if not _LOGGER.handlers:
+    _log_dir=pathlib.Path.home()/"TaskbarKitten"
+    try: _log_dir.mkdir(parents=True, exist_ok=True)
+    except: _log_dir=pathlib.Path.home()
+    _h=logging.FileHandler(_log_dir/(__name__.split(".")[-1]+".log"),
+                           encoding="utf-8")
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _LOGGER.addHandler(_h)
+    _LOGGER.setLevel(logging.INFO)
 
 from animator import SpriteAnimator
 
 from taskbar import calc_position, get_taskbar_edge, get_taskbar_rect, get_screen_size
-
-import ctypes, pathlib, random, time, json, datetime
 
 import memory as mem
 
@@ -630,7 +642,7 @@ class PetWindow:
 
         if self.is_duck or self.walk_active: return
 
-        print(f"🚶 walk to {target_x}")
+        _LOGGER.info("walk to %s", target_x)
 
         try:
 
@@ -2693,16 +2705,114 @@ class PetWindow:
             except: pass
         return jp
 
+    # ---- password lock + encryption (Fernet via cryptography) ----
+    def _journal_lock_path(self):
+        return self._journal_path().with_suffix(".lock")
+
+    def _journal_enc_path(self):
+        return self._journal_path().with_suffix(".enc")
+
+    def _journal_locked(self):
+        return self._journal_lock_path().exists()
+
+    def _journal_derive(self, password):
+        import hashlib, base64
+        salt=self._journal_lock_path().read_bytes()[:16]
+        key=hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
+        return base64.urlsafe_b64encode(key)
+
+    def _journal_unlock(self, password):
+        import hashlib, hmac, json
+        try:
+            lock=self._journal_lock_path().read_text(encoding="utf-8")
+            data=json.loads(lock)
+            salt=bytes.fromhex(data["salt"])
+            want=bytes.fromhex(data["check"])
+            key=hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
+            if not hmac.compare_digest(key, want):
+                return False
+            self._journal_key=self._journal_key_from_key(key)
+            self._journal_unlocked=True
+            return True
+        except: return False
+
+    def _journal_key_from_key(self, key):
+        import base64
+        return base64.urlsafe_b64encode(key)
+
+    def _journal_encrypt(self, data):
+        from cryptography.fernet import Fernet
+        f=Fernet(self._journal_key)
+        import json
+        return f.encrypt(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+    def _journal_decrypt(self, blob):
+        from cryptography.fernet import Fernet
+        f=Fernet(self._journal_key)
+        import json
+        return json.loads(f.decrypt(blob).decode("utf-8"))
+
+    def _journal_set_password(self, password):
+        import hashlib, hmac, json, base64
+        if len(password)<4:
+            return False
+        salt=bytes(bytearray([1,35,69,103,137,171,205,239,7,29,51,73,95,117,139,161]))
+        salt=hashlib.sha256(salt+self._journal_path().name.encode()).digest()[:16]
+        key=hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
+        lock=self._journal_lock_path()
+        lock.write_text(json.dumps({"salt":salt.hex(),"check":key.hex()}), encoding="utf-8")
+        # encrypt existing data
+        data=self._load_journal()
+        key_b64=base64.urlsafe_b64encode(key)
+        from cryptography.fernet import Fernet
+        f=Fernet(key_b64)
+        blob=f.encrypt(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+        self._journal_enc_path().write_bytes(blob)
+        # remove plaintext
+        try:
+            jp=self._journal_path()
+            if jp.exists(): jp.unlink()
+        except: pass
+        # cache key for this session without prompting again
+        old=self._journal_key
+        self._journal_key=key_b64
+        return True
+
+    def _journal_remove_password(self):
+        for p in (self._journal_lock_path(), self._journal_enc_path()):
+            try:
+                if p.exists(): p.unlink()
+            except: pass
+        self._journal_key=None
+        self._journal_unlocked=False
+
     def _load_journal(self):
         import json
         try:
+            if self._journal_locked():
+                if getattr(self, "_journal_key", None) and self._journal_enc_path().exists():
+                    return self._journal_decrypt(self._journal_enc_path().read_bytes())
+                return {}
             if self._journal_path().exists():
                 return json.loads(self._journal_path().read_text(encoding='utf-8'))
-        except: pass
+        except Exception as _e:
+            _LOGGER.error("journal load failed: %s", _e)
         return {}
 
     def _save_journal(self, data):
         import json, tempfile, os
+        if self._journal_locked():
+            try:
+                if getattr(self, "_journal_key", None):
+                    self._journal_enc_path().write_bytes(self._journal_encrypt(data))
+                else:
+                    self._journal_enc_path().write_bytes(self._journal_encrypt_dummy(data))
+            except Exception as _e:
+                _LOGGER.error("journal enc save failed: %s", _e)
+                try:
+                    self._journal_enc_path().write_bytes(self._journal_encrypt_dummy(data))
+                except: pass
+            return
         p=self._journal_path()
         try:
             # atomic + backup, never lost
@@ -2717,98 +2827,543 @@ class PetWindow:
             try: p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
             except: pass
 
+    def _journal_encrypt_dummy(self, data):
+        import json
+        from cryptography.fernet import Fernet
+        import hashlib, base64
+        salt=b"TaskbarKitten-salt"
+        key=hashlib.sha256(salt).digest()
+        f=Fernet(base64.urlsafe_b64encode(key))
+        return f.encrypt(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+    def _entry_text(self, e):
+        return e if isinstance(e, str) else (e or {}).get("text", "")
+
+    def _entry_fmt(self, e):
+        if isinstance(e, str): return []
+        return list((e or {}).get("fmt", []) or [])
+
+    def _capture_fmt(self, txt):
+        """Read the Text widget's tags into a compact, persistable list.
+        fmt entries -> (start_char, end_char, kind) where kind is
+        'b','i','u','h','c:RRGGBB','l:url'. Char offsets are flat character
+        positions in the plain text."""
+        if txt is None: return []
+        out=[]
+        def flat(idx):
+            return len(txt.get("1.0", idx))
+        # dump text with tags
+        try:
+            queue={}
+            for key, val, idx in txt.dump("1.0", tk.END, tag=True):
+                if key in ("tagstart","tagon"): queue[val]=idx
+                elif key in ("tagend","tagoff") and val in queue:
+                    out.append((flat(queue[val]), flat(idx), val))
+                    queue.pop(val, None)
+        except: pass
+        mapped=[]
+        for s,e,t in out:
+            if t in ("bold","italic","underline","heading"):
+                mapped.append((s,e,{"bold":"b","italic":"i","underline":"u","heading":"h"}[t]))
+            elif t.startswith("color_"):
+                mapped.append((s,e,"c:"+t.replace("color_","")))
+            elif t.startswith("link_"):
+                url=txt._links.get(t,"")
+                if url: mapped.append((s,e,"l:"+url))
+        mapped.sort(key=lambda x:(x[0],x[1]))
+        return mapped
+
+    def _apply_fmt(self, txt, fmt):
+        """Re-apply persisted formatting to a freshly-loaded Text widget."""
+        if not fmt: return
+        def to_idx(off):
+            return txt.index(f"1.0 + {off} chars")
+        for s,e,kind in fmt:
+            if not kind: continue
+            try:
+                si=to_idx(s); ei=to_idx(e)
+            except: continue
+            if kind=="b": txt.tag_add("bold", si, ei)
+            elif kind=="i": txt.tag_add("italic", si, ei)
+            elif kind=="u": txt.tag_add("underline", si, ei)
+            elif kind=="h": txt.tag_add("heading", si, ei)
+            elif kind.startswith("c:"):
+                hexc=kind[2:]
+                t=f"color_{hexc}"
+                txt.tag_configure(t, foreground="#"+hexc)
+                txt.tag_add(t, si, ei)
+            elif kind.startswith("l:"):
+                url=kind[2:]
+                t=f"link_{len(txt.tag_names())}"
+                txt.tag_configure(t, foreground="#0066CC", underline=True)
+                txt.tag_add(t, si, ei)
+                txt.tag_bind(t, "<Button-1>", lambda e, u=url: self._open_link(u))
+
+    def _entry_mood(self, e):
+        return "" if isinstance(e, str) else (e or {}).get("mood", "")
+
+    def _entry_rating(self, e):
+        return 0 if isinstance(e, str) else int((e or {}).get("rating", 0) or 0)
+
+    def _entry_tags(self, e):
+        return [] if isinstance(e, str) else list((e or {}).get("tags", []) or [])
+
+    def _entry_photos(self, e):
+        return [] if isinstance(e, str) else list((e or {}).get("photos", []) or [])
+
+    def _journal_photos_dir(self):
+        d=self._journal_path().parent/"journal_photos"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _attach_photos(self, date_key):
+        """Pick one or more photos; copy them into Madhu's book folder. Returns names."""
+        import tkinter.filedialog as fd, datetime
+        top=None
+        was_top=False
+        try:
+            for w in self.root.winfo_children():
+                if isinstance(w, tk.Toplevel) and w.title().startswith("Gayathree"):
+                    top=w; break
+            if top is not None:
+                try: was_top=bool(top.attributes("-topmost"))
+                except: was_top=False
+                if was_top: top.attributes("-topmost", False)
+            files=fd.askopenfilenames(initialdir=str(pathlib.Path.home() / "Pictures"),
+                                      title="Pick a photo for Madhu's book",
+                                      filetypes=[("Images","*.png *.jpg *.jpeg *.gif *.bmp"),("All files","*.*")])
+            if top is not None and was_top:
+                try: top.attributes("-topmost", True)
+                except: pass
+        except:
+            if top is not None and was_top:
+                try: top.attributes("-topmost", True)
+                except: pass
+            return []
+        if not files: return []
+        from PIL import Image
+        added=[]
+        for f in list(files)[:6]:
+            try:
+                im=Image.open(f)
+                im.thumbnail((460,460), Image.LANCZOS)
+                name=datetime.datetime.now().strftime("%H%M%S")+"_"+str(pathlib.Path(f).stem)[:30].replace(" ","_").replace(".","_")+".png"
+                dest=self._journal_photos_dir()/name
+                im.convert("RGB").save(dest, "PNG")
+                added.append(dest.name)
+            except: pass
+        return added
+
+    def _journal_streak(self, data):
+        import datetime
+        try:
+            dates=sorted([d for d,v in data.items() if self._entry_text(v).strip()])
+            if not dates: return 0
+            streak=0
+            cur=datetime.date.today()
+            for i in range(60):
+                d=(cur - datetime.timedelta(days=i)).isoformat()
+                if d in data and self._entry_text(data[d]).strip(): streak+=1
+                else: break
+                if i==0 and d not in data: break
+            return streak
+        except: return 0
+
+    def _entry_populated(self, e):
+        if isinstance(e, str): return bool(e.strip())
+        return bool((e or {}).get("text","").strip() or (e or {}).get("mood") or (e or {}).get("rating"))
+
     def show_journal(self):
+        import datetime, json
+        # ---- password gate ----
+        if self._journal_locked() and not getattr(self, "_journal_key", None):
+            gate=tk.Toplevel(self.root)
+            gate.title("Madhu's Journal 🔒")
+            gw,gh=360,210
+            gate.geometry(f"{gw}x{gh}+{gate.winfo_screenwidth()//2-gw//2}+{max(0,gate.winfo_screenheight()//2-gh//2)}")
+            gate.configure(bg="#FDF6E3")
+            gate.attributes("-topmost", True)
+            tk.Label(gate, text="🔒  Madhu guards this book", bg="#FDF6E3", fg="#6B4C3B", font=("Georgia", 13, "bold")).pack(pady=(18,2))
+            tk.Label(gate, text="whisper the password, Gayathree", bg="#FDF6E3", fg="#8B7355", font=("Segoe UI", 9, "italic")).pack()
+            pw_var=tk.StringVar()
+            pw=tk.Entry(gate, textvariable=pw_var, show="●", bg="white", fg="#3a2a1a", font=("Segoe UI", 11), justify="center", width=20)
+            pw.pack(pady=14, ipady=3)
+            status=tk.Label(gate, text="", bg="#FDF6E3", fg="#a05a5a", font=("Segoe UI", 8))
+            status.pack()
+            def go(_=None):
+                if self._journal_unlock(pw_var.get()):
+                    gate.destroy()
+                    self._open_journal(win_from=self.root)
+                else:
+                    status.configure(text="wrong password — try again ♡")
+                    pw.delete(0, tk.END)
+            pw.bind("<Return>", go)
+            tk.Button(gate, text="Unlock ♡", command=go, bg="#FF8FA3", fg="white", font=("Segoe UI", 9, "bold"), bd=0, padx=18, pady=5, cursor="hand2").pack(pady=6)
+            gate.focus_force(); pw.focus_set()
+            return
+        self._open_journal(win_from=self.root)
+
+    def _open_journal(self, win_from=None):
         import datetime, json
         win=tk.Toplevel(self.root)
         win.title("Gayathree\'s Journal 📖 — Madhu's Keepsake")
-        W,H=820,560
+        W,H=860,600
         sw=self.root.winfo_screenwidth(); sh=self.root.winfo_screenheight()
-        win.geometry(f"{W}x{H}+{sw//2-W//2}+{sh//2-H//2}")
+        win.geometry(f"{W}x{H}+{sw//2-W//2}+{max(0,sh//2-H//2)}")
         win.configure(bg="#FDF6E3")
         win.attributes("-topmost", True)
         # book canvas with warm parchment + soft shadow + linen texture dots
         canvas=tk.Canvas(win, width=W, height=H, bg="#FDF6E3", highlightthickness=0)
         canvas.pack(fill="both", expand=True)
-        def _rr(x1,y1,x2,y2,r, **kw): pts=[x1+r,y1, x2-r,y1, x2,y1, x2,y1+r, x2,y2-r, x2,y2, x2-r,y2, x1+r,y2, x1,y2, x1,y2-r, x1,y1+r, x1,y1]; return canvas.create_polygon(pts, smooth=True, **kw)
-        # layered shadow for depth
-        _rr(18,18,W-12,H-12,22, fill="#E8DCC8", outline="")
-        _rr(14,14,W-14,H-14,20, fill="#E6D5B8", outline="")
-        _rr(8,8,W-8,H-8,20, fill="#FFFCF7", outline="#C9A86A", width=2)
-        # central spine + stitches
-        canvas.create_line(W//2, 28, W//2, H-28, fill="#D8C4A6", width=3)
-        for y in range(40, H-40, 18): canvas.create_oval(W//2-1.5, y-1.5, W//2+1.5, y+1.5, fill="#C9A86A", outline="")
-        # Madhu paw peek top-right
+        # --- responsive book re-layout ---
+        _redraw_job={"id":None}
+        _decodata={"paw":None}
+        def _redecorate(cw, ch):
+            canvas.delete("deco")
+            def _rr(x1,y1,x2,y2,r, **kw): pts=[x1+r,y1, x2-r,y1, x2,y1, x2,y1+r, x2,y2-r, x2,y2, x2-r,y2, x1+r,y2, x1,y2, x1,y2-r, x1,y1+r, x1,y1]; return canvas.create_polygon(pts, smooth=True, **kw)
+            _rr(18,18,cw-12,ch-12,22, fill="#E8DCC8", outline="", tags="deco")
+            _rr(14,14,cw-14,ch-14,20, fill="#E6D5B8", outline="", tags="deco")
+            inner=_rr(8,8,cw-8,ch-8,20, fill="#FFFCF7", outline="#C9A86A", width=2, tags="deco")
+            canvas.create_line(cw//2, 28, cw//2, ch-28, fill="#D8C4A6", width=3, tags="deco")
+            for y in range(40, ch-40, 18): canvas.create_oval(cw//2-1.5, y-1.5, cw//2+1.5, y+1.5, fill="#C9A86A", outline="", tags="deco")
+            canvas.create_line(cw//2-90, 62, cw//2+90, 62, fill="#E6D5B8", width=1, tags="deco")
+            canvas.create_text(cw//2, 62, text=" ✦ ", fill="#C9A86A", font=("Segoe UI", 7), tags="deco")
+            paw=_decodata.get("paw")
+            if paw is not None: canvas.create_image(cw-48, 36, image=paw, tags="deco")
+            return inner
+        def _relayout(cw, ch):
+            page_w=max(248, cw//2 - 38)   # both pages grow equally (book symmetry)
+            left.place(x=22, y=72, width=page_w, height=ch-108)
+            right.place(x=cw//2+16, y=72, width=cw//2-38, height=ch-108)
+            left.configure(width=page_w)
+            right.configure(width=cw//2-38)
+        def _schedule_redraw(e=None):
+            if _redraw_job["id"]:
+                try: win.after_cancel(_redraw_job["id"])
+                except: pass
+            cw=win.winfo_width(); ch=win.winfo_height()
+            if cw<=1 or ch<=1: cw,ch=W,H
+            _redraw_job["id"]=win.after(40, lambda: (_redecorate(cw,ch), _relayout(cw,ch)))
+        win.bind("<Configure>", _schedule_redraw)
+        # --- initial decorations ---
         try:
             from PIL import Image as _PILImage, ImageTk as _PILTK
             import pathlib as _pl
             pth=_pl.Path(__file__).parent.parent / "assets" / "sprites" / "frame_4.png"
             im=_PILImage.open(pth).convert("RGBA").resize((44,44), _PILImage.LANCZOS)
             tkp=_PILTK.PhotoImage(im)
-            win._paw=tkp
-            canvas.create_image(W-48, 36, image=tkp)
-        except: canvas.create_text(W-48, 36, text="🐾", font=("Segoe UI", 18))
-        # header with divider flourishes
-        tk.Label(win, text="Gayathree \'s Journal", bg="#FFFCF7", fg="#6B4C3B", font=("Georgia", 16, "bold")).place(x=W//2, y=22, anchor="n")
-        tk.Label(win, text="— a little book Madhu keeps for you —", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8, "italic")).place(x=W//2, y=44, anchor="n")
-        canvas.create_line(W//2-90, 62, W//2+90, 62, fill="#E6D5B8", width=1)
-        canvas.create_text(W//2, 62, text=" ✦ ", fill="#C9A86A", font=("Segoe UI", 7))
+            _decodata["paw"]=tkp; win._paw=tkp
+        except: pass
+        _redecorate(W,H)
+        # header with divider flourishes (stored for relayout)
+        _win_labels=[tk.Label(win, text="Gayathree \'s Journal", bg="#FFFCF7", fg="#6B4C3B", font=("Georgia", 16, "bold")),
+                     tk.Label(win, text="— a little book Madhu keeps for you —", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8, "italic"))]
+        _win_labels[0].place(x=W//2, y=22, anchor="n")
+        _win_labels[1].place(x=W//2, y=44, anchor="n")
         # left page — calendar & streak
         left=tk.Frame(win, bg="#FFFCF7", bd=0)
-        left.place(x=22, y=72, width=240, height=H-108)
+        left.place(x=22, y=72, width=248, height=H-108)
         tk.Label(left, text="📅  Days with Madhu", bg="#FFFCF7", fg="#6B4C3B", font=("Segoe UI", 9, "bold")).pack(pady=(6,2))
         # streak
         data=self._load_journal()
-        filled=len([v for v in data.values() if v.strip()])
+        filled=len([v for v in data.values() if self._entry_populated(v)])
         streak=self._journal_streak(data)
         tk.Label(left, text=f"{filled} pages  •  {streak} day streak 🔥", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 7)).pack()
+        # search box
+        search_var=tk.StringVar()
+        search_frame=tk.Frame(left, bg="#FFFCF7")
+        search_frame.pack(fill="x", padx=8, pady=(6,0))
+        tk.Label(search_frame, text="🔍", bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 9)).pack(side="left")
+        search_entry=tk.Entry(search_frame, textvariable=search_var, bg="white", fg="#5a3e2b",
+                              insertbackground="#6B4C3B", font=("Segoe UI", 9), relief="solid", bd=1, highlightthickness=0)
+        search_entry.pack(side="left", fill="x", expand=True, padx=(4,0), ipady=2)
+        def clear_search():
+            search_var.set("")
+            _full_refresh("")
+        tk.Button(search_frame, text="✕", command=clear_search, bd=0, bg="#FFFCF7", fg="#C9A86A",
+                  activebackground="#FFDAB9", font=("Segoe UI", 8), cursor="hand2").pack(side="left", padx=(3,0))
         lb_frame=tk.Frame(left, bg="#FFFCF7")
         lb_frame.pack(fill="both", expand=True, padx=8, pady=8)
         # subtle paper lines behind list
         lb=tk.Listbox(lb_frame, bg="white", fg="#5a3e2b", font=("Segoe UI", 9), bd=1, relief="solid", highlightthickness=0, activestyle="none", selectbackground="#FFDAB9", selectforeground="#5a3e2b")
         lb.pack(fill="both", expand=True, ipady=4)
+        # stats button
+        tk.Button(left, text="📊  Calender & Madhu's insights",
+                  command=lambda: self._show_stats(win, data, dark=dark_var.get(),
+                                                   on_day=lambda ds: _goto_date(ds)),
+                  bg="#EFE3CF", fg="#6B4C3B", activebackground="#E6D5B8", font=("Segoe UI", 8, "bold"),
+                  bd=0, padx=6, pady=4, cursor="hand2").pack(side="bottom", padx=8, pady=(0,8))
         # right page — writing paper with lines
         right=tk.Frame(win, bg="#FFFCF7", bd=1, relief="solid")
-        right.place(x=W//2+14, y=72, width=W//2-36, height=H-108)
+        right.place(x=W//2+16, y=72, width=W//2-38, height=H-108)
         today=datetime.date.today().isoformat()
+        date_var=tk.StringVar(value=today)
         pretty_today=datetime.datetime.now().strftime("%A, %B %d  —  %Y")
         hdr=tk.Frame(right, bg="#FFFCF7")
-        hdr.pack(fill="x", padx=10, pady=(8,2))
-        tk.Label(hdr, text=pretty_today, bg="#FFFCF7", fg="#8B7355", font=("Georgia", 9, "italic")).pack(side="left")
+        hdr.pack(fill="x", padx=10, pady=(7,2))
+        date_label=tk.Label(hdr, text=pretty_today, bg="#FFFCF7", fg="#8B7355", font=("Georgia", 9, "italic"))
+        date_label.pack(side="left")
         wc_var=tk.StringVar(value="0 words")
-        tk.Label(hdr, textvariable=wc_var, bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 7)).pack(side="right")
+        wc_lbl=tk.Label(hdr, textvariable=wc_var, bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 7))
+        wc_lbl.pack(side="right")
+        # dark mode toggle
+        dark_var=tk.BooleanVar(value=False)
+        def toggle_dark():
+            dark_var.set(not dark_var.get())
+            dark_tbtn.config(text="☀️" if dark_var.get() else "🌙")
+            self._apply_journal_theme(win, dark_var.get())
+        dark_tbtn=tk.Button(hdr, text="🌙", command=toggle_dark, bd=0, bg="#FFFCF7", fg="#6B4C3B",
+                            activebackground="#FFDAB9", font=("Segoe UI", 8), cursor="hand2")
+        dark_tbtn.pack(side="right", padx=(6,0))
+        # ---- MOOD row: how's your heart ----
+        mood_bar=tk.Frame(right, bg="#FFFCF7")
+        mood_bar.pack(fill="x", padx=10)
+        tk.Label(mood_bar, text="How's your heart today?", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8)).pack(side="left")
+        mood_var=tk.StringVar(value="")
+        mood_btns={}
+        for m in ["😍","😊","😐","😢","😤","🌙"]:
+            b=tk.Button(mood_bar, text=m, width=2, bd=0, bg="#FFFCF7", fg="#6B4C3B",
+                        activebackground="#FFDAB9", font=("Segoe UI", 10), cursor="hand2",
+                        command=lambda m=m: (self._pick_mood(m, mood_var, mood_btns), win.after(700, lambda: _save(silent=True))))
+            b.pack(side="left", padx=1)
+            mood_btns[m]=b
+        # hearts rating
+        tk.Label(mood_bar, text="   ♡", bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 8)).pack(side="left")
+        rating_var=tk.IntVar(value=0)
+        heart_btns=[]
+        def draw_hearts():
+            r=rating_var.get()
+            for i,b in enumerate(heart_btns):
+                b.configure(text="♥" if i<r else "♡", fg="#FF8FA3" if i<r else "#C9A86A")
+        def set_rating(i):
+            rating_var.set(i if rating_var.get()!=i else 0)
+            draw_hearts()
+            _autosave()
+        for i in range(1,6):
+            b=tk.Button(mood_bar, text="♡", width=1, bd=0, bg="#FFFCF7", fg="#C9A86A",
+                        activebackground="#FFDAB9", font=("Segoe UI", 10), cursor="hand2",
+                        command=lambda i=i: set_rating(i))
+            b.pack(side="left", padx=0)
+            heart_btns.append(b)
+        # ---- TAGS row ----
+        tag_bar=tk.Frame(right, bg="#FFFCF7")
+        tag_bar.pack(fill="x", padx=10, pady=(3,2))
+        tk.Label(tag_bar, text="tags:", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8)).pack(side="left")
+        tags_selected=set()
+        tag_btns={}
+        tag_defs=[("❤️ love","#FFD2DC"),("🏡 us","#FFE2C2"),("📚 study","#EAD9B0"),("💭 thoughts","#DDD3C8"),("🌙 dreams","#CBDBEA"),("✨ today","#F0D9B4")]
+        def refresh_tags():
+            for t,b in tag_btns.items():
+                on=t in tags_selected
+                base_bg="#382f22" if dark_var.get() else "#FFFCF7"
+                base_fg="#c9b796" if dark_var.get() else "#6B4C3B"
+                b.configure(bg="#FF8FA3" if t=="love" and on else ("#C9A86A" if t!="love" and on else base_bg),
+                            fg="white" if on else base_fg)
+        def toggle_tag(t):
+            if t in tags_selected: tags_selected.discard(t)
+            else: tags_selected.add(t)
+            refresh_tags()
+            _autosave()
+        for t,c in tag_defs:
+            b=tk.Button(tag_bar, text=t, bd=0, bg="#FFFCF7", fg="#6B4C3B",
+                        activebackground="#FFDAB9", font=("Segoe UI", 7), cursor="hand2",
+                        command=lambda t=t: toggle_tag(t))
+            b.pack(side="left", padx=1, pady=1)
+            tag_btns[t]=b
+        # separator
+        tk.Frame(right, bg="#E6D5B8", height=1).pack(fill="x", padx=8)
+        # formatting toolbar
+        fmt_bar=tk.Frame(right, bg="#FFFCF7", height=34)
+        fmt_bar.pack(fill="x", padx=8, pady=(3,1))
+        fmt_buttons = [
+            ("B", "bold", "bold"), ("I", "italic", "italic"), ("U", "underline", "underline"),
+            ("🎨", "color", "color"), ("🔗", "link", "link"), ("📝", "h1", "heading"),
+            ("📋", "list", "bullet"), ("☑", "todo", "todo"),
+        ]
+        for label, tag, cmd in fmt_buttons:
+            btn=tk.Button(fmt_bar, text=label, width=3, bg="#FFFCF7", fg="#6B4C3B",
+                          activebackground="#FFDAB9", activeforeground="#6B4C3B",
+                          bd=0, font=("Segoe UI", 9), cursor="hand2",
+                          command=lambda t=tag: self._apply_format(txt, t))
+            btn.pack(side="left", padx=2, pady=2)
+        tk.Frame(right, bg="#E6D5B8", height=1).pack(fill="x", padx=8)
+        # ---- buttons anchored bottom (packed BEFORE the expanding text area) ----
+        btnrow=tk.Frame(right, bg="#FFFCF7")
+        btnrow.pack(side="bottom", fill="x", padx=8, pady=(2,1))
+        toolrow=tk.Frame(right, bg="#FFFCF7")
+        toolrow.pack(side="bottom", fill="x", padx=8, pady=(0,4))
+        photo_bar=tk.Frame(right, bg="#FFFCF7")
+        photo_bar.pack(side="bottom", fill="x", padx=8, pady=(0,2))
+        _photo_imgs=[]
+        def photo_strip(d):
+            for ch in photo_bar.winfo_children(): ch.destroy()
+            e=data.get(d, "")
+            names=self._entry_photos(e)
+            phd=self._journal_photos_dir()
+            if names:
+                tk.Label(photo_bar, text="📷 ", bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 8)).pack(side="left")
+            for n in names[:5]:
+                p=phd/n
+                if not p.exists(): continue
+                try:
+                    from PIL import Image as PI, ImageTk as PT
+                    im=PI.open(p); im.thumbnail((44,44), PI.LANCZOS)
+                    tkp=PT.PhotoImage(im)
+                    _photo_imgs.append(tkp)
+                    tk.Label(photo_bar, image=tkp, bd=1, relief="solid", bg="#FFFCF7").pack(side="left", padx=1)
+                except: pass
         paper=tk.Frame(right, bg="white")
         paper.pack(fill="both", expand=True, padx=8, pady=4)
-        txt=tk.Text(paper, bg="white", fg="#3a2a1a", font=("Segoe UI", 11), wrap="word", bd=0, padx=12, pady=10, undo=True, spacing1=4, spacing3=8, insertbackground="#8B4513", state="normal", takefocus=1)
+        txt=tk.Text(paper, bg="white", fg="#3a2a1a", font=("Segoe UI", 11), wrap="word", bd=0, padx=12, pady=10, undo=True, state="normal", takefocus=1)
+        txt._links={}
         txt.pack(fill="both", expand=True)
         txt.configure(highlightthickness=1, highlightbackground="#E6D5B8")
         txt.focus_force()
-        # subtle horizontal rules overlay (via canvas lines behind text is complex, so add tag)
-        def update_wc(e=None): 
+        # rich text tags
+        txt.tag_configure("bold", font=("Segoe UI", 11, "bold"))
+        txt.tag_configure("italic", font=("Segoe UI", 11, "italic"))
+        txt.tag_configure("underline", underline=True)
+        txt.tag_configure("heading", font=("Georgia", 14, "bold"), foreground="#6B4C3B")
+        txt.tag_configure("todo_done", foreground="#8B7355", overstrike=True)
+
+        # ---- load a date into the editor ----
+        auto_after=None
+        def _autosave(silent=True):
+            nonlocal auto_after
+            try:
+                if auto_after: win.after_cancel(auto_after)
+            except: pass
+            auto_after=win.after(900, lambda: _save(silent=silent))
+        def update_wc(e=None):
             words=len(txt.get("1.0", tk.END).split())
             wc_var.set(f"{words} words")
+            if e: _autosave()
         txt.bind("<KeyRelease>", update_wc)
-        date_var=tk.StringVar(value=today)
-        # hidden date var for save
-        data=self._load_journal()
+        txt.bind("<Control-y>", lambda e: (txt.edit_redo(), update_wc(e)) and None)
+        txt.bind("<Control-z>", lambda e: (txt.edit_undo(), update_wc(e)) and None)
+
+        def _apply_entry(d):
+            e=data.get(d, "")
+            mood_var.set(self._entry_mood(e))
+            rating_var.set(self._entry_rating(e))
+            tags_selected.clear()
+            tags_selected.update(self._entry_tags(e))
+            refresh_tags(); draw_hearts()
+            txt.delete("1.0", tk.END)
+            txt.insert("1.0", self._entry_text(e))
+            self._apply_fmt(txt, self._entry_fmt(e))
+            # inline embedded photos at the end of the entry
+            if not hasattr(txt, "_inline_imgs"): txt._inline_imgs=[]
+            txt._inline_imgs=[]
+            phd=self._journal_photos_dir()
+            txt.insert(tk.END, "\n")
+            for n in self._entry_photos(e):
+                p=phd/n
+                if not p.exists(): continue
+                try:
+                    from PIL import Image as PI, ImageTk as PT
+                    im=PI.open(p); im.thumbnail((180,180), PI.LANCZOS)
+                    tkp=PT.PhotoImage(im)
+                    txt._inline_imgs.append(tkp)
+                    txt.image_create(tk.END, image=tkp)
+                    txt.insert(tk.END, "\n")
+                except: pass
+            if txt._inline_imgs:
+                txt.mark_set("insert", "end-1c")
+            photo_strip(d)
+            update_wc()
+
+        def _save(silent=False):
+            d=date_var.get()
+            cur=data.get(d)
+            if isinstance(cur, str): cur={"text": cur}
+            else: cur=dict(cur or {})
+            cur["text"]=txt.get("1.0", tk.END).rstrip()
+            cur["fmt"]=self._capture_fmt(txt)
+            cur["mood"]=mood_var.get()
+            cur["rating"]=int(rating_var.get())
+            cur["tags"]=sorted(tags_selected)
+            cur["ts"]=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            data[d]=cur
+            # refresh list entry
+            for i in range(lb.size()):
+                if lb.get(i).split(" ")[0]==d:
+                    mark=" ●" if self._entry_populated(cur) else " ○"
+                    mood=self._entry_mood(cur)
+                    lb.delete(i); lb.insert(i, f"{d}{' '+mood if mood else ''}{mark}")
+                    lb.selection_clear(0, tk.END); lb.selection_set(i); lb.see(i)
+                    break
+            else:
+                lb.insert(0, d + " ●")
+            self._save_journal(data)
+            if not silent:
+                self._show_bubble(f"Saved {d} — kept forever in Madhu's book ♡", 2800)
+                try:
+                    btn.configure(bg="#C9A86A")
+                    win.after(180, lambda: btn.configure(bg="#FF8FA3"))
+                except: pass
+
         def load_date(d):
             date_var.set(d)
-            txt.delete("1.0", tk.END)
-            txt.insert("1.0", data.get(d, ""))
-            update_wc()
-            # pretty header per date
+            _apply_entry(d)
             try:
                 dt=datetime.datetime.fromisoformat(d)
-                pretty=dt.strftime("%A, %B %d  —  %Y")
-                # find header label and update
-                for w in hdr.winfo_children():
-                    if isinstance(w, tk.Label) and "20" in w.cget("text") or "," in w.cget("text"):
-                        w.configure(text=pretty)
-                        break
+                date_label.configure(text=dt.strftime("%A, %B %d  —  %Y"))
             except: pass
+
+        def _goto_date(d):
+            """Called when a calendar day is clicked in the stats window."""
+            if d not in data:
+                data[d]={}
+            _full_refresh()
+            load_date(d)
+            try:
+                idx=lb.size()
+                for i in range(lb.size()):
+                    if lb.get(i).split(" ")[0]==d: idx=i; break
+                if idx<lb.size():
+                    lb.selection_clear(0, tk.END); lb.selection_set(idx); lb.see(idx)
+            except: pass
+
+        def _refresh_list(needle=None):
+            lb.delete(0, tk.END)
+            needle=(needle or "").strip().lower()
+            for d in sorted(set(list(data.keys()) + [today]), reverse=True):
+                e=data.get(d, "")
+                if needle:
+                    hay=" ".join([d, self._entry_text(e), self._entry_mood(e), " ".join(self._entry_tags(e))]).lower()
+                    if needle not in hay: continue
+                mark=" ●" if self._entry_populated(e) else " ○"
+                mood=self._entry_mood(e)
+                lb.insert(tk.END, (f"{d} {mood}" if mood else d) + mark)
+            return lb.size()
+
+        def _full_refresh(needle=None):
+            n=_refresh_list(needle)
+            # select the best match: exact today, else first result, else keep current date
+            target=date_var.get()
+            idx=lb.size()
+            for i in range(n):
+                if lb.get(i).split(" ")[0]==target: idx=i; break
+            if idx==lb.size():
+                for i in range(n):
+                    if lb.get(i).split(" ")[0]==date_var.get(): idx=i; break
+            if n>0 and idx==lb.size(): idx=0
+            if n>0:
+                lb.selection_clear(0, tk.END); lb.selection_set(idx); lb.see(idx)
+
+        def on_search(*_):
+            needle=search_var.get().strip() or None
+            if needle and len(needle)<200: _full_refresh(needle)
+            else: _full_refresh()
+        search_var.trace_add("write", on_search)
+
         dates=sorted(set(list(data.keys()) + [today]), reverse=True)
         for d in dates:
-            mark=" ●" if data.get(d, "").strip() else " ○"
-            lb.insert(tk.END, d + mark)
+            e=data.get(d, "")
+            mark=" ●" if self._entry_populated(e) else " ○"
+            mood=self._entry_mood(e)
+            lb.insert(tk.END, (f"{d} {mood}" if mood else d) + mark)
         try:
             idx=dates.index(today)
             lb.selection_set(idx); lb.see(idx)
@@ -2821,29 +3376,90 @@ class PetWindow:
                 d=raw.split(" ")[0]
                 load_date(d)
         lb.bind("<<ListboxSelect>>", on_select)
-        def save():
+
+        # ---- buttons: Save on row 1, tools on row 2 ----
+        btn=tk.Button(btnrow, text="💾  Save for Madhu", command=lambda: _save(silent=False), bg="#FF8FA3", fg="white", activebackground="#FFA0B5", font=("Segoe UI", 9, "bold"), bd=0, padx=14, pady=7, cursor="hand2")
+        btn.pack(side="left", padx=2)
+        def backdate():
+            import tkinter.simpledialog as sd
             d=date_var.get()
-            data[d]=txt.get("1.0", tk.END).rstrip()
-            # also update list mark
-            sel=lb.curselection()
-            if sel:
-                raw=lb.get(sel[0]); base=raw.split(" ")[0]
-                if base==d:
-                    mark=" ●" if data[d].strip() else " ○"
-                    lb.delete(sel[0]); lb.insert(sel[0], d+mark); lb.selection_set(sel[0])
-            # if new date not in list, add
-            if d not in dates:
-                lb.insert(0, d + (" ●" if data[d].strip() else " ○"))
+            ans=sd.askstring("Backdate entry", "Change this entry's date\n(YYYY-MM-DD):", initialvalue=d, parent=win)
+            if ans:
+                ans=ans.strip()
+                try:
+                    datetime.date.fromisoformat(ans)
+                except:
+                    self._show_bubble("That date looks wrong, darling — use YYYY-MM-DD", 3000); return
+                if ans==d: return
+                import tkinter.messagebox as mb
+                existing=data.get(ans)
+                if self._entry_populated(existing):
+                    ans2=mb.askyesno("Wait, that page has memories", f"There's already an entry on {ans}.\nMove today's page there anyway?\n(The {ans} page will be replaced.)", parent=win)
+                    if not ans2: return
+                # move current entry to new date
+                cur=data.pop(d, {})
+                if isinstance(cur, str): cur={"text": cur}
+                else: cur=dict(cur or {})
+                date_var.set(ans)
+                data[ans]=cur
+                # full list refresh
+                lb.delete(0, tk.END)
+                for dd in sorted(set(list(data.keys())+[ans]), reverse=True):
+                    e=data.get(dd,"")
+                    mark=" ●" if self._entry_populated(e) else " ○"
+                    mo=self._entry_mood(e)
+                    lb.insert(tk.END, (f"{dd} {mo}" if mo else dd)+mark)
+                load_date(ans)
+                self._save_journal(data)
+                self._show_bubble(f"Moved to {ans} ♡", 2800)
+        bk=tk.Button(toolrow, text="✎  backdate", command=backdate, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2")
+        bk.pack(side="left", padx=2)
+        def new_page():
+            import tkinter.simpledialog as sd
+            # propose today if free, else the next free day ahead
+            proposal=today
+            if self._entry_populated(data.get(today)):
+                dd=datetime.date.today()
+                for i in range(1,31):
+                    cand=(dd+datetime.timedelta(days=i)).isoformat()
+                    if not self._entry_populated(data.get(cand)):
+                        proposal=cand; break
+            ans=sd.askstring("New page 📄", "Create a page for date\n(YYYY-MM-DD):", initialvalue=proposal, parent=win)
+            if not ans: return
+            ans=ans.strip()
+            try: datetime.date.fromisoformat(ans)
+            except:
+                self._show_bubble("Use YYYY-MM-DD, darling", 3000); return
+            if not self._entry_populated(data.get(ans)) and ans in data:
+                pass
+            if ans not in data: data[ans]={}
+            date_var.set(ans)
+            load_date(ans)
+            _full_refresh()
             self._save_journal(data)
-            self._show_bubble(f"Journal saved for {d} ♡", 2800)
-            # tiny ink save shimmer
-            try:
-                btn.configure(bg="#C9A86A")
-                win.after(180, lambda: btn.configure(bg="#FF8FA3"))
-            except: pass
-        btn=tk.Button(right, text="💾  Save this page  — Madhu will keep it forever", command=save, bg="#FF8FA3", fg="white", activebackground="#FFA0B5", font=("Segoe UI", 9, "bold"), bd=0, padx=14, pady=7, cursor="hand2")
-        btn.pack(pady=8)
-        # also add time changer link
+            self._show_bubble(f"Fresh page open for {ans} ✨", 2800)
+            txt.focus_set()
+        tk.Button(toolrow, text="📄  new page", command=new_page, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
+        def del_page():
+            import tkinter.messagebox as mb
+            d=date_var.get()
+            if not self._entry_populated(data.get(d)):
+                self._show_bubble("That page is already empty, love", 2500); return
+            if not mb.askyesno("Delete page 🗑", f"Delete the page for {d} forever?\nMadhu won't keep it anymore…", parent=win):
+                return
+            data.pop(d, None)
+            self._save_journal(data)
+            _full_refresh()
+            # go to today or first remaining page
+            if today in data: load_date(today)
+            elif data:
+                load_date(sorted(data.keys())[-1])
+            else:
+                date_var.set(today); load_date(today)
+            self._show_bubble("Page gone — new memories ready to be written ♡", 3000)
+        tk.Button(toolrow, text="🗑  delete page", command=del_page, bg="#F3E3E0", fg="#a05a5a", activebackground="#E8D3CF", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
+        tk.Button(toolrow, text="📤  export", command=lambda: self._export_journal(win, data),
+                  bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def change_time():
             import tkinter.simpledialog as sd
             cur=f"{self.memory.get('journal_hour',21):02d}:{self.memory.get('journal_min',0):02d}"
@@ -2856,18 +3472,352 @@ class PetWindow:
                         import memory as mem; mem.save(self.memory)
                         self._show_bubble(f"Reminder set to {h:02d}:{m:02d} ♡", 3000)
                 except: pass
-        tk.Label(right, text="⏰  change reminder time", bg="#FFFCF7", fg="#C49A6C", font=("Segoe UI", 7, "underline"), cursor="hand2").pack()
-        # bind label click
-        for w in right.winfo_children():
-            if isinstance(w, tk.Label) and "change reminder" in w.cget("text"):
-                w.bind("<Button-1>", lambda e: change_time())
+        tk.Button(toolrow, text="⏰ reminder", command=change_time, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
+        def manage_lock():
+            import tkinter.simpledialog as sd, tkinter.messagebox as mb
+            if self._journal_locked():
+                if mb.askyesno("Remove password?", "Turn off the lock? Existing entries stay safe.", parent=win):
+                    self._journal_remove_password()
+                    try: self._save_journal(data)
+                    except: pass
+                    self._show_bubble("Lock removed — Madhu's book is open", 3000)
+            else:
+                pw1=sd.askstring("Protect journal 🔒", "Set a password\n(so Madhu's book stays private):", show="●", parent=win)
+                if pw1:
+                    pw2=sd.askstring("Protect journal 🔒", "Repeat the password:", show="●", parent=win)
+                    if pw1!=pw2:
+                        self._show_bubble("Passwords don't match ♡", 3000); return
+                    if self._journal_set_password(pw1):
+                        self._show_bubble("Journal locked — only you can read it 🔒", 4000)
+                    else:
+                        self._show_bubble("Need at least 4 characters, love", 3000)
+        tk.Button(toolrow, text="🔒  lock", command=manage_lock, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
+        miscrow=tk.Frame(right, bg="#FFFCF7")
+        miscrow.pack(side="bottom", fill="x", padx=8, pady=(0,2))
+        def add_photo():
+            d=date_var.get()
+            names=self._attach_photos(d)
+            if names:
+                cur=data.get(d)
+                if isinstance(cur,str): cur={"text":cur}
+                cur=dict(cur or {})
+                cur["photos"]=list(cur.get("photos",[]))+names
+                data[d]=cur
+                self._save_journal(data)
+                photo_strip(d)
+                self._show_bubble(f"{len(names)} photo{'s' if len(names)>1 else ''} tucked into the page ♡", 3500)
+        tk.Button(miscrow, text="📷  photo", command=add_photo, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
+        def photo_delete():
+            import tkinter.messagebox as mb
+            d=date_var.get()
+            cur=data.get(d)
+            known=self._entry_photos(cur)
+            if not known:
+                self._show_bubble("No photos on this page yet, love", 2500); return
+            if mb.askyesno("Remove photos 📷", "Remove all photos from this page?\n(Madhu keeps copies in the book folder.)", parent=win):
+                raw=data.get(d)
+                cur={"text": raw} if isinstance(raw, str) else dict(raw or {})
+                cur["photos"]=[]
+                data[d]=cur
+                self._save_journal(data)
+                photo_strip(d)
+                self._show_bubble("Photos cleared from the page ♡", 2500)
+        tk.Button(miscrow, text="✕ photos", command=photo_delete, bg="#F3E3E0", fg="#a05a5a", activebackground="#E8D3CF", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def on_close():
-            try: save()
+            try: _save(silent=True)
             except: pass
             win.destroy()
         win.protocol("WM_DELETE_WINDOW", on_close)
         txt.focus_set()
         update_wc()
+
+    def _pick_mood(self, m, mood_var, mood_btns):
+        for k,b in mood_btns.items():
+            b.configure(bg="#FFD2DC" if k==m and mood_var.get()!=m else "#FFFCF7")
+        if mood_var.get()==m: mood_var.set("")
+        else: mood_var.set(m)
+        # also show mood char in the header date label area is complex; keep simple
+        rtxt=mood_var.get()
+        # gentle bubble if a mood picked
+        if rtxt:
+            self._show_bubble(f"Madhu notes your mood: {rtxt}", 2000)
+
+    def _show_stats(self, parent, data, dark=False, on_day=None):
+        """Theme-styled calendar + statistics dashboard"""
+        import datetime, calendar
+        win=tk.Toplevel(parent)
+        win.title("Madhu's Insights 📊")
+        W,H=680,520
+        sw=self.root.winfo_screenwidth(); sh=self.root.winfo_screenheight()
+        win.geometry(f"{W}x{H}+{sw//2-W//2}+{max(0,sh//2-H//2)}")
+        win.configure(bg="#FDF6E3")
+        canvas=tk.Canvas(win, width=W, height=H, bg="#FDF6E3", highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+        def _rr(x1,y1,x2,y2,r,**kw): pts=[x1+r,y1,x2-r,y1,x2,y1,x2,y1+r,x2,y2-r,x2,y2,x2-r,y2,x1+r,y2,x1,y2,x1,y2-r,x1,y1+r,x1,y1]; return canvas.create_polygon(pts,smooth=True,**kw)
+        _rr(6,6,W-6,H-6,18, fill="#E8DCC8", outline="")
+        _rr(2,2,W-2,H-2,14, fill="#FFFCF7", outline="#C9A86A", width=2)
+        tk.Label(win, text="📊  Madhu's little insights", bg="#FFFCF7", fg="#6B4C3B", font=("Georgia", 14, "bold")).place(x=W//2, y=14, anchor="n")
+        tk.Label(win, text="— what your pages whisper —", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8, "italic")).place(x=W//2, y=38, anchor="n")
+        # lifetime stats row
+        dates=[d for d,v in data.items() if self._entry_populated(v)]
+        total=len(dates)
+        words=sum(len(self._entry_text(v).split()) for v in data.values())
+        streak=self._journal_streak(data)
+        days_with=len(set(v.get("mood") for v in data.values() if not isinstance(v,str) and v.get("mood")))
+        # entries with mood
+        moods=[v.get("mood") for v in data.values() if not isinstance(v,str) and v.get("mood")]
+        from collections import Counter
+        mc=Counter(moods)
+        top_mood=mc.most_common(1)[0][0] if mc else "—"
+        ages=0
+        if dates:
+            try:
+                first=min(datetime.date.fromisoformat(d) for d in dates)
+                ages=(datetime.date.today()-first).days
+            except: pass
+        stats_frame=tk.Frame(win, bg="#FFFCF7")
+        stats_frame.place(x=20, y=56, width=W-40, height=64)
+        labels=[("pages", str(total)), ("words", str(words)), ("🔥 streak", f"{streak}d"), ("moods", str(len(mc))), ("top mood", top_mood), ("oldest", f"{ages}d ago" if ages else "—")]
+        col=0
+        for name,val in labels:
+            f=tk.Frame(stats_frame, bg="#FFFCF7", bd=0)
+            f.place(relx=col/len(labels), rely=0, relwidth=1/len(labels), relheight=1)
+            tk.Label(f, text=val, bg="#FFFCF7", fg="#6B4C3B", font=("Georgia", 16, "bold")).pack(anchor="center")
+            tk.Label(f, text=name, bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 8)).pack(anchor="center")
+            col+=1
+        # calendar grid of last 3 months worth of filled days
+        cal_frame=tk.Frame(win, bg="#FFFCF7")
+        cal_frame.place(x=20, y=128, width=W-40, height=180)
+        tk.Label(cal_frame, text="🗓  pages over time (last 12 weeks)  —  ● = written · emoji = mood", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8)).pack(anchor="w")
+        week_labels=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+        hdr=tk.Frame(cal_frame, bg="#FFFCF7")
+        hdr.pack(fill="x")
+        for wl in week_labels:
+            tk.Label(hdr, text=wl, bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 7, "bold"), width=10).pack(side="left", expand=True)
+        grid=tk.Frame(cal_frame, bg="#FFFCF7")
+        grid.pack(fill="both", expand=True)
+        # build 12 weeks ending today
+        today=datetime.date.today()
+        # start on Monday 12 weeks back
+        monday=datetime.date.fromordinal(today.toordinal() - today.weekday() - 7*11)
+        for r in range(12):
+            for c in range(7):
+                d=monday + datetime.timedelta(weeks=r, days=c)
+                cell=tk.Frame(grid, bg="#FFFCF7", bd=0, width=0, height=0)
+                cell.grid(row=r, column=c, sticky="nsew", padx=1, pady=1)
+                for cc in range(7): grid.columnconfigure(cc, weight=1)
+                grid.rowconfigure(r, weight=1)
+                ds=d.isoformat()
+                e=data.get(ds)
+                populated=self._entry_populated(e) if e else False
+                is_today = (d==today)
+                bg="#FFD2DC" if is_today else "#FFFCF7"
+                fg="#8B7355" if not populated else "#6B4C3B"
+                mood=""
+                if populated and not isinstance(e,str): mood=e.get("mood","") or ""
+                datelbl_text=(mood if mood else ("●" if populated else str(d.day)))
+                def _goto(ds=ds):
+                    win.destroy()
+                    if on_day: on_day(ds)
+                tk.Button(cell, bg=bg, font=("Segoe UI", 7), text=datelbl_text, fg=fg,
+                          activebackground="#FFDAB9", bd=0, relief="flat", cursor="hand2",
+                          command=_goto).pack(fill="both", expand=True)
+        # mood trend: mini bar by month for last 6 months
+        trend_frame=tk.Frame(win, bg="#FFFCF7")
+        trend_frame.place(x=20, y=316, width=W-40, height=170)
+        tk.Label(trend_frame, text="📈  entries per week (last 12)  —  hearts = your rating", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8)).pack(anchor="w")
+        tc=tk.Canvas(trend_frame, bg="#FFFCF7", highlightthickness=0)
+        tc.pack(fill="both", expand=True, pady=4)
+        # count entries per week
+        weekly=[]
+        for r in range(12):
+            wstart=monday + datetime.timedelta(weeks=r)
+            cnt=sum(1 for i in range(7) if self._entry_populated(data.get((wstart+datetime.timedelta(days=i)).isoformat())))
+            avg=0
+            rr=[self._entry_rating(data.get((wstart+datetime.timedelta(days=i)).isoformat())) if self._entry_populated(data.get((wstart+datetime.timedelta(days=i)).isoformat())) else 0 for i in range(7)]
+            avg=sum(rr)/7 if rr else 0
+            weekly.append((cnt,avg))
+        mx=max([x[0] for x in weekly]+[1])
+        bar_w=36; gap=14; left0=20; baseline=120
+        for i,(cnt,avg) in enumerate(weekly):
+            x=left0+i*(bar_w+gap)
+            h=int(cnt/mx*90) if mx else 0
+            tc.create_rectangle(x, baseline-h, x+bar_w, baseline, fill="#E6A88F" if cnt else "#F3E9D8", outline="")
+            if avg:
+                tc.create_text(x+bar_w//2, baseline-h-8, text="♥"*max(1,round(avg)), fill="#FF8FA3", font=("Segoe UI", 6))
+            tc.create_text(x+bar_w//2, baseline+10, text=f"w{i}", fill="#C9A86A", font=("Segoe UI", 6))
+        # tag breakdown
+        tag_counts=Counter()
+        for v in data.values():
+            if not isinstance(v,str):
+                for t in (v.get("tags") or []): tag_counts[t]+=1
+        if tag_counts:
+            tk.Label(trend_frame, text="  top tags:  " + "  ·  ".join(f"{t} ×{n}" for t,n in tag_counts.most_common(4)), bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 7)).pack(side="bottom", anchor="w", pady=2)
+        tk.Button(win, text="Close ♡", command=win.destroy, bg="#FF8FA3", fg="white",
+                  activebackground="#FFA0B5", font=("Segoe UI", 9, "bold"), bd=0, padx=18, pady=5, cursor="hand2").place(x=W//2-40, y=H-40)
+        win.attributes("-topmost", True)
+        win.transient(parent)
+        if dark:
+            self._apply_journal_theme(win, True)
+
+    def _apply_journal_theme(self, win, dark):
+        """Warm night-parchment dark mode — cocoa + gold, not cold navy."""
+        if dark:
+            # warm chocolate dark palette
+            map_bg={ "#FFFCF7":"#2e261c", "white":"#342b1f", "#FDF6E3":"#1e1810",
+                     "#EFE3CF":"#382f22", "#FFD2DC":"#4a2a2c", "#FFDAB9":"#4e3a24",
+                     "#E6D5B8":"#4a3c2e", "#F3E3E0":"#3a2820", "#F0D9B4":"#443620",
+                     "#E8D3CF":"#3a2820", "#DDD3C8":"#4a3c2e", "#CBDBEA":"#2c3038",
+                     "#EAD9B0":"#3e3424" }
+            map_fg={ "#6B4C3B":"#f0e2c4", "#8B7355":"#c9b796", "#5a3e2b":"#f0e2c4",
+                     "#3a2a1a":"#f5ecda", "#C9A86A":"#e8c474", "#C49A6C":"#e8c474",
+                     "#a05a5a":"#d4848a" }
+            txt_bg="#342b1f"; txt_fg="#f5ecda"; hl_bg="#4a3c2e"
+        else:
+            # original warm parchment light
+            map_bg={ "#2e261c":"#FFFCF7", "#342b1f":"white", "#1e1810":"#FDF6E3",
+                     "#382f22":"#EFE3CF", "#4a2a2c":"#FFD2DC", "#4e3a24":"#FFDAB9",
+                     "#4a3c2e":"#E6D5B8", "#3a2820":"#F3E3E0", "#443620":"#F0D9B4",
+                     "#2c3038":"#CBDBEA", "#3e3424":"#EAD9B0" }
+            map_fg={ "#f0e2c4":"#6B4C3B", "#c9b796":"#8B7355", "#f5ecda":"#3a2a1a",
+                     "#e8c474":"#C9A86A", "#d4848a":"#a05a5a" }
+            txt_bg="white"; txt_fg="#3a2a1a"; hl_bg="#E6D5B8"
+        # Toplevel + canvas backdrop
+        win.configure(bg="#1e1810" if dark else "#FDF6E3")
+        for cc in [w for w in win.winfo_children() if isinstance(w, tk.Canvas)]:
+            cc.configure(bg="#1e1810" if dark else "#FDF6E3")
+        memo=set()
+        def relabel(node):
+            if id(node) in memo: return
+            memo.add(id(node))
+            for w in node.winfo_children():
+                if isinstance(w, tk.Widget):
+                    try:
+                        cur_bg=str(w.cget("bg"))
+                        cur_bg=cur_bg if cur_bg.startswith("#") else cur_bg
+                        nb=map_bg.get(cur_bg)
+                        if nb: w.configure(bg=nb)
+                        cur_fg=str(w.cget("fg"))
+                        if cur_fg.startswith("#"):
+                            nf=map_fg.get(cur_fg) or map_bg.get(cur_fg)
+                            if nf: w.configure(fg=nf)
+                        if isinstance(w, tk.Text):
+                            w.configure(bg=txt_bg, fg=txt_fg, highlightbackground=hl_bg)
+                            for t in w.tag_names():
+                                try:
+                                    opts={}
+                                    if dark: opts={"foreground":"#f0e2c4"} if t=="heading" else {}
+                                    if t=="todo_done": opts={"foreground":"#a89a82"}
+                                    if t in ("bold","italic","underline"): opts={}
+                                    if opts: w.tag_configure(t, **opts)
+                                except: pass
+                    except: pass
+                relabel(w)
+        relabel(win)
+
+    def _export_journal(self, parent, data, only_today=""):
+        """Backup entries as plain text + a simple PDF (no external deps)."""
+        import datetime, os
+        def ask(ext):
+            import tkinter.filedialog as fd
+            return fd.asksaveasfilename(parent=parent, defaultextension=ext,
+                                        initialdir=str(pathlib.Path.home() / "Desktop"),
+                                        initialfile=f"Madhu_Journal_{datetime.date.today()}.{ext}",
+                                        filetypes=[(ext.upper() + " file", "*." + ext)])
+        m=tk.Menu(parent, tearoff=0, bg="#FFFCF7", fg="#6B4C3B", activebackground="#FFDAB9")
+        def alltxt():
+            dest=ask("txt")
+            if dest:
+                self._journal_write_txt(data, pathlib.Path(dest))
+                self._show_bubble("Backup saved: " + os.path.basename(str(dest)), 3500)
+        def allpdf():
+            dest=ask("pdf")
+            if dest:
+                self._journal_write_pdf(data, pathlib.Path(dest))
+                self._show_bubble("PDF book saved ♡", 3500)
+        def todaytxt():
+            dest=ask("txt")
+            if dest:
+                self._journal_write_txt(data, pathlib.Path(dest), only_today)
+                self._show_bubble("Today exported ♡", 2500)
+        def todaypdf():
+            dest=ask("pdf")
+            if dest:
+                self._journal_write_pdf(data, pathlib.Path(dest), only_today)
+                self._show_bubble("Today's PDF saved ♡", 2500)
+        m.add_command(label="Export ALL - text file (.txt)", command=alltxt)
+        m.add_command(label="Export ALL - PDF book (.pdf)", command=allpdf)
+        m.add_separator()
+        m.add_command(label="Export today only - text (.txt)", command=todaytxt)
+        m.add_command(label="Export today only - PDF (.pdf)", command=todaypdf)
+        try:
+            m.post(parent.winfo_pointerx(), parent.winfo_pointery())
+        except:
+            pass
+
+    def _journal_lines(self, data, today_only=""):
+        keys=sorted(data.keys())
+        if today_only: keys=[today_only]
+        for d in keys:
+            e=data.get(d, "")
+            txt=self._entry_text(e)
+            if today_only and not txt.strip(): continue
+            mood=self._entry_mood(e)
+            rating=self._entry_rating(e)
+            tags=self._entry_tags(e)
+            yield f"-- {d} --"
+            meta=[]
+            if mood: meta.append(f"mood {mood}")
+            if rating: meta.append("hearts " + "♥"*rating)
+            if tags: meta.append("tags: " + ", ".join(tags))
+            if meta: yield "   " + "   ".join(meta)
+            yield "   " + (txt.strip().replace("\n", "\n   ") if txt.strip() else "(no words)")
+            yield ""
+
+    def _journal_write_txt(self, data, path, only_today=""):
+        import datetime
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("Gayathree's Journal - kept by Madhu ♡\n")
+            f.write("exported " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M") + "\n" + "="*40 + "\n\n")
+            for l in self._journal_lines(data, only_today): f.write(l + "\n")
+        return path
+
+    def _journal_write_pdf(self, data, path, only_today=""):
+        import datetime
+        def hexstr(t):
+            r=[]
+            for c in t:
+                o=ord(c)
+                r.append(hex(o)[2:].rjust(2,"0") if o<128 else "20")
+            return "".join(r)
+        body_lines=["BT /F1 14 Tf 60 750 Td <" + hexstr("Gayathree's Journal - kept by Madhu") + "> Tj ET",
+                    "BT /F1 9 Tf 60 736 Td <" + hexstr("exported " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M')) + "> Tj ET"]
+        y=712
+        for l in self._journal_lines(data, only_today):
+            if y<45:
+                body_lines.append("BT /F1 10 Tf 60 720 Td <> Tj ET")
+                y=712
+            body_lines.append("BT /F1 10 Tf 60 " + str(y) + " Td <" + hexstr(l) + "> Tj ET")
+            y-=14
+        stream="\n".join(body_lines).encode("latin-1")
+        catalog=b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        pages=b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+        page=(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+              b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n")
+        content=b"4 0 obj\n<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream\nendobj\n"
+        font=b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+        parts=[catalog, pages, page, content, font]
+        out=bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        offs=[0]
+        for p in parts:
+            offs.append(len(out)); out+=p
+        xref=len(out)
+        out+=b"xref\n0 6\n0000000000 65535 f \n"
+        for o in offs[1:6]:
+            out+=("%010d 00000 n \n" % o).encode()
+        out+=("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref).encode()
+        path.write_bytes(bytes(out))
+        return path
 
     def check_journal_reminder(self):
         try:
@@ -2893,11 +3843,102 @@ class PetWindow:
         except: pass
         self.root.after(25000, self.check_journal_reminder)
 
+    # --- Rich Text Formatting Methods ---
+    def _apply_format(self, txt, tag):
+        """Apply formatting tag to selected text"""
+        if tag == "bullet":
+            self._toggle_bullet(txt); return
+        if tag == "todo":
+            self._toggle_todo(txt); return
+        try:
+            if not txt.tag_ranges("sel"):
+                return
+            if tag in ("bold", "italic", "underline"):
+                if tag in txt.tag_names("sel.first"):
+                    txt.tag_remove(tag, "sel.first", "sel.last")
+                else:
+                    txt.tag_add(tag, "sel.first", "sel.last")
+            elif tag == "color":
+                self._pick_color(txt)
+            elif tag == "link":
+                self._add_link(txt)
+            elif tag == "heading":
+                self._toggle_tag(txt, "heading")
+        except: pass
+
+    def _pick_color(self, txt):
+        try:
+            import tkinter.colorchooser as cc
+            color = cc.askcolor(title="Choose text color", parent=txt.winfo_toplevel())
+            if color[1]:
+                tag_name = f"color_{color[1].replace('#','')}"
+                txt.tag_configure(tag_name, foreground=color[1])
+                if tag_name in txt.tag_names("sel.first"):
+                    txt.tag_remove(tag_name, "sel.first", "sel.last")
+                else:
+                    txt.tag_add(tag_name, "sel.first", "sel.last")
+        except: pass
+
+    def _add_link(self, txt):
+        import tkinter.simpledialog as sd
+        url = sd.askstring("Add Link", "Enter URL:", parent=txt.winfo_toplevel())
+        if url:
+            tag_name = f"link_{len(txt.tag_names())}"
+            txt.tag_configure(tag_name, foreground="#0066CC", underline=True)
+            txt.tag_add(tag_name, "sel.first", "sel.last")
+            if not hasattr(txt, "_links"): txt._links={}
+            txt._links[tag_name]=url
+            # store URL in tag data
+            txt.tag_bind(tag_name, "<Button-1>", lambda e: self._open_link(url))
+
+    def _open_link(self, url):
+        import webbrowser
+        webbrowser.open(url)
+
+    def _toggle_tag(self, txt, tag):
+        if tag in txt.tag_names("sel.first"):
+            txt.tag_remove(tag, "sel.first", "sel.last")
+        else:
+            txt.tag_add(tag, "sel.first", "sel.last")
+
+    def _toggle_bullet(self, txt):
+        try:
+            # Get current line
+            line_start = txt.index("insert linestart")
+            line_end = txt.index("insert lineend")
+            line_text = txt.get(line_start, line_end)
+            if line_text.startswith("• "):
+                txt.delete(line_start, f"{line_start}+2c")
+            else:
+                txt.insert(line_start, "• ")
+        except: pass
+
+    def _toggle_todo(self, txt):
+        try:
+            line_start = txt.index("insert linestart")
+            line_end = txt.index("insert lineend")
+            line_text = txt.get(line_start, line_end)
+            if line_text.startswith("☐ "):
+                txt.delete(line_start, line_end)
+                txt.insert(line_start, "☑ " + line_text[2:])
+                txt.tag_add("todo_done", line_start, f"{line_start}+{len('☑ ')+len(line_text[2:])}c")
+            elif line_text.startswith("☑ "):
+                txt.delete(line_start, line_end)
+                txt.insert(line_start, "☐ " + line_text[2:])
+                txt.tag_remove("todo_done", line_start, f"{line_start}+{len('☐ ')+len(line_text[2:])}c")
+            else:
+                txt.insert(line_start, "☐ ")
+                txt.tag_remove("todo_done", line_start, f"{line_start} lineend")
+        except: pass
+
+    def _toggle_tag(self, txt, tag):
+        if tag in txt.tag_names("sel.first"):
+            txt.tag_remove(tag, "sel.first", "sel.last")
+        else:
+            txt.tag_add(tag, "sel.first", "sel.last")
+
     def _is_dont_sleep(self):
-
         return time.time() < self._dont_sleep_until
-
-
 
     def toggle_dont_sleep(self):
 
