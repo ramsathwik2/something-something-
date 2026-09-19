@@ -71,11 +71,11 @@ class PetWindow:
 
         if self.memory.get("pos_x") is not None:
 
-            self.walk_x = int(self.memory["pos_x"])
+            self.walk_x = int(self._clamp_x(self.memory["pos_x"]))
 
         else:
 
-            self.walk_x = self._load_pos()
+            self.walk_x = self._clamp_x(self._load_pos())
 
         self.walk_dir = 1
 
@@ -346,7 +346,11 @@ class PetWindow:
 
         if self.walk_x is not None:
 
-            x = int(self.walk_x)
+            x = int(self._clamp_x(self.walk_x))
+
+            if x != self.walk_x:
+
+                self.walk_x = x
 
             _, y = calc_position(self.pet_w, self.pet_h, self.placement)
 
@@ -664,7 +668,13 @@ class PetWindow:
 
         self.walk_active=True
 
+        self._walk_steps=0; self._walk_bounces=0
+
         self._walk_target=target_x
+
+        # keep the animation flywheel alive (spot-walk must show real walk frames)
+
+        self._anim_after = self.root.after(10, self.animate)
 
         self._walk_to_step()
 
@@ -676,21 +686,11 @@ class PetWindow:
 
             self.walk_active=False; self._walk_after=None; return
 
-        # clamp target to taskbar
+        # clamp target into the shared taskbar lane
 
-        tr=get_taskbar_rect()
+        min_x, max_x = self._lane_bounds()
 
-        sw,_=get_screen_size()
-
-        if tr:
-
-            l,_,r,_=tr; min_x=l+2; max_x=r - self.pet_w -2
-
-        else:
-
-            min_x=2; max_x=sw - self.pet_w -2
-
-        self._walk_target=max(min_x, min(max_x, self._walk_target))
+        self._walk_target = max(min_x, min(max_x, int(self._walk_target)))
 
         diff = self._walk_target - self.walk_x
 
@@ -738,6 +738,29 @@ class PetWindow:
 
 
 
+    def _lane_bounds(self):
+        """Return (min_x, max_x) of the walk lane on the active taskbar edge."""
+        try:
+            tr=get_taskbar_rect()
+            if tr:
+                l,_,r,_=tr
+                return int(l)+2, int(r)-self.pet_w-2
+            sw,_=get_screen_size()
+            return 2, sw-self.pet_w-2
+        except:
+            return 2, 2000000
+
+    def _clamp_x(self, x):
+        """Clamp x into the walk lane shared by trigger_walk/_walk_step/_walk_to_step. None-safe."""
+        if x is None:
+            return None
+        try:
+            a,b=self._lane_bounds()
+            return max(a, min(b, int(x)))
+        except:
+            return int(x)
+
+
     def trigger_walk(self):
 
         if self.is_duck or self.walk_active:
@@ -766,17 +789,16 @@ class PetWindow:
 
         else:
 
-            if random.random() < 0.3:
-
-                self.walk_dir *= -1
+            # pick a fresh heading each walk - no random U-turn retraces
+            self.walk_dir = random.choice([-1,1])
 
         self.animator.set_state("walking", big=False, flip=(self.walk_dir<0))
 
         self.walk_active=True
 
-        sw, _ = get_screen_size()
+        self.walk_x = self._clamp_x(self.walk_x)
 
-        self.walk_x = max(8, min(sw - self.pet_w - 8, self.walk_x))
+        self._walk_steps=0; self._walk_bounces=0
 
         self._anim_after = self.root.after(10, self.animate)
 
@@ -790,21 +812,9 @@ class PetWindow:
 
             self.walk_active=False; self._walk_after=None; return
 
-        # walk everywhere: use taskbar rect, not screen 8..sw-8
+        # walk everywhere: use the shared taskbar lane (not screen 8..sw-8)
 
-        tr=get_taskbar_rect()
-
-        sw, _ = get_screen_size()
-
-        if tr:
-
-            l,_,r,_=tr
-
-            min_x=l+2; max_x=r - self.pet_w -2
-
-        else:
-
-            min_x=2; max_x=sw - self.pet_w -2
+        min_x, max_x = self._lane_bounds()
 
         prev_dir = self.walk_dir
 
@@ -889,6 +899,26 @@ class PetWindow:
         print("💖 petted!")
 
         self.is_petting=True
+
+        # pause any in-progress walk so pet animation owns the screen (no sliding hearts)
+
+        if self.walk_active:
+
+            self.walk_active=False
+
+            self._walk_target=None
+
+            if hasattr(self,'_walk_steps'): self._walk_steps=0
+
+            if hasattr(self,'_walk_bounces'): self._walk_bounces=0
+
+            try:
+
+                if self._walk_after:
+
+                    self.root.after_cancel(self._walk_after); self._walk_after=None
+
+            except: pass
 
         self.last_activity=time.time()
 
@@ -2498,6 +2528,26 @@ class PetWindow:
 
     def trigger_luck(self):
 
+        # pause any in-progress walk so the support-bounce doesn't fight the walk
+
+        if self.walk_active:
+
+            self.walk_active=False
+
+            self._walk_target=None
+
+            if hasattr(self,'_walk_steps'): self._walk_steps=0
+
+            if hasattr(self,'_walk_bounces'): self._walk_bounces=0
+
+            try:
+
+                if self._walk_after:
+
+                    self.root.after_cancel(self._walk_after); self._walk_after=None
+
+            except: pass
+
         idx=self.memory.get("luck_message_index",0)
 
         msgs=self.LUCK_MESSAGES
@@ -2526,7 +2576,7 @@ class PetWindow:
 
         self._play_meow()
 
-        self.root.after(4500, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
+        self.root.after(4500, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
 
         print(f"Wish me luck: {msg}")
 
