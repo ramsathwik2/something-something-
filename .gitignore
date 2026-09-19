@@ -6,3 +6,8 @@ dist/
 *.log
 *.spec
 .vscode/
+assets/journal.json
+assets/journal.enc
+assets/journal.lock
+assets/journal.bak
+assets/journal_photos/

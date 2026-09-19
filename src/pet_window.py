@@ -2879,6 +2879,8 @@ class PetWindow:
         for s,e,t in out:
             if t in ("bold","italic","underline","heading"):
                 mapped.append((s,e,{"bold":"b","italic":"i","underline":"u","heading":"h"}[t]))
+            elif t=="todo_done":
+                mapped.append((s,e,"td"))
             elif t.startswith("color_"):
                 mapped.append((s,e,"c:"+t.replace("color_","")))
             elif t.startswith("link_"):
@@ -2901,6 +2903,11 @@ class PetWindow:
             elif kind=="i": txt.tag_add("italic", si, ei)
             elif kind=="u": txt.tag_add("underline", si, ei)
             elif kind=="h": txt.tag_add("heading", si, ei)
+            elif kind=="td":
+                try:
+                    if txt.get(si, f"{si}+1c")=="☑": si=to_idx(s+2)
+                except: pass
+                txt.tag_add("todo_done", si, ei)
             elif kind.startswith("c:"):
                 hexc=kind[2:]
                 t=f"color_{hexc}"
@@ -3007,6 +3014,12 @@ class PetWindow:
 
     def show_journal(self):
         import datetime, json
+        jw=getattr(self, "_journal_win", None)
+        if jw is not None:
+            try:
+                if jw.winfo_exists():
+                    jw.deiconify(); jw.lift(); jw.focus_force(); return
+            except: pass
         # ---- password gate ----
         if self._journal_locked() and not getattr(self, "_journal_key", None):
             gate=tk.Toplevel(self.root)
@@ -3038,6 +3051,7 @@ class PetWindow:
     def _open_journal(self, win_from=None):
         import datetime, json
         win=tk.Toplevel(self.root)
+        self._journal_win=win
         win.title("Gayathree\'s Journal 📖 — Madhu's Keepsake")
         W,H=860,600
         sw=self.root.winfo_screenwidth(); sh=self.root.winfo_screenheight()
@@ -3052,14 +3066,19 @@ class PetWindow:
         _decodata={"paw":None}
         def _redecorate(cw, ch):
             canvas.delete("deco")
+            dark = getattr(self, "_journal_dark_cur", False)
+            if dark:
+                bevel, step, page, spine, dots, gold = "#342b1f", "#382f22", "#2e261c", "#4a3c2e", "#c9b796", "#e8c474"
+            else:
+                bevel, step, page, spine, dots, gold = "#E8DCC8", "#E6D5B8", "#FFFCF7", "#D8C4A6", "#C9A86A", "#C9A86A"
             def _rr(x1,y1,x2,y2,r, **kw): pts=[x1+r,y1, x2-r,y1, x2,y1, x2,y1+r, x2,y2-r, x2,y2, x2-r,y2, x1+r,y2, x1,y2, x1,y2-r, x1,y1+r, x1,y1]; return canvas.create_polygon(pts, smooth=True, **kw)
-            _rr(18,18,cw-12,ch-12,22, fill="#E8DCC8", outline="", tags="deco")
-            _rr(14,14,cw-14,ch-14,20, fill="#E6D5B8", outline="", tags="deco")
-            inner=_rr(8,8,cw-8,ch-8,20, fill="#FFFCF7", outline="#C9A86A", width=2, tags="deco")
-            canvas.create_line(cw//2, 28, cw//2, ch-28, fill="#D8C4A6", width=3, tags="deco")
-            for y in range(40, ch-40, 18): canvas.create_oval(cw//2-1.5, y-1.5, cw//2+1.5, y+1.5, fill="#C9A86A", outline="", tags="deco")
-            canvas.create_line(cw//2-90, 62, cw//2+90, 62, fill="#E6D5B8", width=1, tags="deco")
-            canvas.create_text(cw//2, 62, text=" ✦ ", fill="#C9A86A", font=("Segoe UI", 7), tags="deco")
+            _rr(18,18,cw-12,ch-12,22, fill=bevel, outline="", tags="deco")
+            _rr(14,14,cw-14,ch-14,20, fill=step, outline="", tags="deco")
+            inner=_rr(8,8,cw-8,ch-8,20, fill=page, outline=gold, width=2, tags="deco")
+            canvas.create_line(cw//2, 28, cw//2, ch-28, fill=spine, width=3, tags="deco")
+            for y in range(40, ch-40, 18): canvas.create_oval(cw//2-1.5, y-1.5, cw//2+1.5, y+1.5, fill=dots, outline="", tags="deco")
+            canvas.create_line(cw//2-90, 62, cw//2+90, 62, fill=step, width=1, tags="deco")
+            canvas.create_text(cw//2, 62, text=" ✦ ", fill=gold, font=("Segoe UI", 7), tags="deco")
             paw=_decodata.get("paw")
             if paw is not None: canvas.create_image(cw-48, 36, image=paw, tags="deco")
             return inner
@@ -3142,8 +3161,10 @@ class PetWindow:
         dark_var=tk.BooleanVar(value=False)
         def toggle_dark():
             dark_var.set(not dark_var.get())
+            self._journal_dark_cur = dark_var.get()
             dark_tbtn.config(text="☀️" if dark_var.get() else "🌙")
             self._apply_journal_theme(win, dark_var.get())
+            _schedule_redraw()
         dark_tbtn=tk.Button(hdr, text="🌙", command=toggle_dark, bd=0, bg="#FFFCF7", fg="#6B4C3B",
                             activebackground="#FFDAB9", font=("Segoe UI", 8), cursor="hand2")
         dark_tbtn.pack(side="right", padx=(6,0))
@@ -3165,8 +3186,10 @@ class PetWindow:
         heart_btns=[]
         def draw_hearts():
             r=rating_var.get()
+            darknow=getattr(self, "_journal_dark_cur", False)
             for i,b in enumerate(heart_btns):
-                b.configure(text="♥" if i<r else "♡", fg="#FF8FA3" if i<r else "#C9A86A")
+                b.configure(text="♥" if i<r else "♡",
+                            fg="#FF8FA3" if i<r else ("#e8c474" if darknow else "#C9A86A"))
         def set_rating(i):
             rating_var.set(i if rating_var.get()!=i else 0)
             draw_hearts()
@@ -3212,12 +3235,33 @@ class PetWindow:
             ("🎨", "color", "color"), ("🔗", "link", "link"), ("📝", "h1", "heading"),
             ("📋", "list", "bullet"), ("☑", "todo", "todo"),
         ]
+        fmt_btns={}
         for label, tag, cmd in fmt_buttons:
             btn=tk.Button(fmt_bar, text=label, width=3, bg="#FFFCF7", fg="#6B4C3B",
                           activebackground="#FFDAB9", activeforeground="#6B4C3B",
                           bd=0, font=("Segoe UI", 9), cursor="hand2",
-                          command=lambda t=cmd: (self._apply_format(txt, t), txt.focus_force()))
+                          command=lambda t=cmd: (self._apply_format(txt, t), txt.focus_force(), refresh_fmt_buttons()))
             btn.pack(side="left", padx=2, pady=2)
+            fmt_btns[cmd]=btn
+        def refresh_fmt_buttons():
+            try:
+                tags=set(txt.tag_names("insert"))
+                cur_line=txt.get("insert linestart", "insert lineend")
+            except: return
+            darknow=getattr(self, "_journal_dark_cur", False)
+            hot="#4e3a24" if darknow else "#FFDAB9"
+            base="#2e261c" if darknow else "#FFFCF7"
+            for cmd,b in fmt_btns.items():
+                on=False
+                if cmd=="bold": on="bold" in tags
+                elif cmd=="italic": on="italic" in tags
+                elif cmd=="underline": on="underline" in tags
+                elif cmd=="heading": on="heading" in tags
+                elif cmd=="color": on=any(t.startswith("color_") for t in tags)
+                elif cmd=="link": on=any(t.startswith("link_") for t in tags)
+                elif cmd=="bullet": on=cur_line.startswith("• ")
+                elif cmd=="todo": on=cur_line.startswith("☑ ") or cur_line.startswith("☐ ")
+                b.configure(relief="sunken" if on else "flat", bg=hot if on else base)
         tk.Frame(right, bg="#E6D5B8", height=1).pack(fill="x", padx=8)
         # ---- buttons anchored bottom (packed BEFORE the expanding text area) ----
         btnrow=tk.Frame(right, bg="#FFFCF7")
@@ -3262,27 +3306,36 @@ class PetWindow:
         def render_inline_photos():
             """Embed the page's photos at the end of the editor (re-entrant)."""
             if not hasattr(txt, "_inline_imgs"): txt._inline_imgs=[]
+            # remove old inline images together with the stray newline after each
             for key, val, idx in txt.dump("1.0", tk.END):
                 if key=="image":
-                    try: txt.delete(idx)
+                    try:
+                        if txt.get(idx, f"{idx}+1c")=="\n": txt.delete(idx, f"{idx}+1c")
+                        else: txt.delete(idx)
                     except: pass
             del txt._inline_imgs[:]
             dd=date_var.get()
             phd=self._journal_photos_dir()
-            txt.insert(tk.END, "\n")
-            for n in self._entry_photos(data.get(dd)):
-                p=phd/n
-                if not p.exists(): continue
+            names=[n for n in self._entry_photos(data.get(dd)) if (phd/n).exists()]
+            # collapse blank-line rubble left by older renders
+            body=txt.get("1.0", tk.END)
+            if "\n\n\n" in body:
+                txt.delete("1.0", tk.END)
+                txt.insert("1.0", body.replace("\n\n\n", "\n\n"))
+            if not names:
+                return
+            # start the photo block on its own line
+            if txt.get("1.0", "end-1c") and txt.get("end-2c", "end-1c") != "\n":
+                txt.insert(tk.END, "\n")
+            for n in names:
                 try:
                     from PIL import Image as PI, ImageTk as PT
-                    im=PI.open(p); im.thumbnail((180,180), PI.LANCZOS)
+                    im=PI.open(phd/n); im.thumbnail((180,180), PI.LANCZOS)
                     tkp=PT.PhotoImage(im)
                     txt._inline_imgs.append(tkp)
                     txt.image_create(tk.END, image=tkp)
                     txt.insert(tk.END, "\n")
                 except: pass
-            if txt._inline_imgs:
-                txt.mark_set("insert", "end-1c")
 
         # ---- load a date into the editor ----
         auto_after=None
@@ -3308,8 +3361,10 @@ class PetWindow:
         def update_wc(e=None):
             words=len(txt.get("1.0", tk.END).split())
             wc_var.set(f"{words} words")
+            refresh_fmt_buttons()
             if e: _autosave()
         txt.bind("<KeyRelease>", update_wc)
+        txt.bind("<<Selection>>", lambda e: refresh_fmt_buttons())
         txt.bind("<Control-y>", lambda e: (txt.edit_redo(), update_wc(e)) and None)
         txt.bind("<Control-z>", lambda e: (txt.edit_undo(), update_wc(e)) and None)
 
@@ -3325,10 +3380,11 @@ class PetWindow:
             tags_selected.clear()
             tags_selected.update(self._entry_tags(e))
             refresh_tags(); draw_hearts()
-            # repaint mood button highlight to match current entry
+            # repaint mood button highlight to match current entry (theme-aware)
+            m_sel="#4a2a2c" if dark_var.get() else "#FFD2DC"
+            m_base="#2e261c" if dark_var.get() else "#FFFCF7"
             for mb_name, mb in mood_btns.items():
-                if mb_name=="🌙": continue
-                try: mb.configure(bg="#FFD2DC" if mb_name==mood_var.get() else "#FFFCF7")
+                try: mb.configure(bg=m_sel if mb_name==mood_var.get() else m_base)
                 except: pass
             txt.delete("1.0", tk.END)
             txt.insert("1.0", self._entry_text(e))
@@ -3339,6 +3395,7 @@ class PetWindow:
             render_inline_photos()
             photo_strip(d)
             update_wc()
+            refresh_fmt_buttons()
 
         def _save(silent=False):
             d=date_var.get()
@@ -3352,13 +3409,17 @@ class PetWindow:
             cur["tags"]=sorted(tags_selected)
             cur["ts"]=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             data[d]=cur
-            # refresh list entry
+            # refresh list entry (only when its text changed; no forced jump)
             for i in range(lb.size()):
                 if lb.get(i).split(" ")[0]==d:
                     mark=" ●" if self._entry_populated(cur) else " ○"
                     mood=self._entry_mood(cur)
-                    lb.delete(i); lb.insert(i, f"{d}{' '+mood if mood else ''}{mark}")
-                    lb.selection_clear(0, tk.END); lb.selection_set(i); lb.see(i)
+                    new=f"{d}{' '+mood if mood else ''}{mark}"
+                    if lb.get(i)!=new:
+                        lb.delete(i); lb.insert(i, new)
+                    sel=lb.curselection()
+                    if not sel or sel[0]!=i:
+                        lb.selection_clear(0, tk.END); lb.selection_set(i)
                     break
             else:
                 lb.insert(0, d + " ●")
@@ -3598,14 +3659,18 @@ class PetWindow:
         def on_close():
             try: _save(silent=True)
             except: pass
+            self._journal_win=None
             win.destroy()
         win.protocol("WM_DELETE_WINDOW", on_close)
         txt.focus_set()
         update_wc()
 
     def _pick_mood(self, m, mood_var, mood_btns):
+        darknow = getattr(self, "_journal_dark_cur", False)
+        sel="#4a2a2c" if darknow else "#FFD2DC"
+        base="#2e261c" if darknow else "#FFFCF7"
         for k,b in mood_btns.items():
-            b.configure(bg="#FFD2DC" if k==m and mood_var.get()!=m else "#FFFCF7")
+            b.configure(bg=sel if k==m and mood_var.get()!=m else base)
         if mood_var.get()==m: mood_var.set("")
         else: mood_var.set(m)
         # also show mood char in the header date label area is complex; keep simple
@@ -3617,7 +3682,14 @@ class PetWindow:
     def _show_stats(self, parent, data, dark=False, on_day=None):
         """Theme-styled calendar + statistics dashboard"""
         import datetime, calendar
+        sw_existing=getattr(self, "_stats_win", None)
+        if sw_existing is not None:
+            try:
+                if sw_existing.winfo_exists():
+                    sw_existing.deiconify(); sw_existing.lift(); sw_existing.focus_force(); return
+            except: pass
         win=tk.Toplevel(parent)
+        self._stats_win=win
         win.title("Madhu's Insights 📊")
         W,H=640,600
         sw=self.root.winfo_screenwidth(); sh=self.root.winfo_screenheight()
@@ -3626,8 +3698,11 @@ class PetWindow:
         canvas=tk.Canvas(win, width=W, height=H, bg="#FDF6E3", highlightthickness=0)
         canvas.pack(fill="both", expand=True)
         def _rr(x1,y1,x2,y2,r,**kw): pts=[x1+r,y1,x2-r,y1,x2,y1,x2,y1+r,x2,y2-r,x2,y2,x2-r,y2,x1+r,y2,x1,y2,x1,y2-r,x1,y1+r,x1,y1]; return canvas.create_polygon(pts,smooth=True,**kw)
-        _rr(6,6,W-6,H-6,18, fill="#E8DCC8", outline="")
-        _rr(2,2,W-2,H-2,14, fill="#FFFCF7", outline="#C9A86A", width=2)
+        dbevel="#342b1f" if dark else "#E8DCC8"
+        dfill="#2e261c" if dark else "#FFFCF7"
+        dout="#e8c474" if dark else "#C9A86A"
+        _rr(6,6,W-6,H-6,18, fill=dbevel, outline="")
+        _rr(2,2,W-2,H-2,14, fill=dfill, outline=dout, width=2)
         tk.Label(win, text="📊  Madhu's little insights", bg="#FFFCF7", fg="#6B4C3B", font=("Georgia", 14, "bold")).place(x=W//2, y=14, anchor="n")
         tk.Label(win, text="— what your pages whisper —", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8, "italic")).place(x=W//2, y=38, anchor="n")
         # lifetime stats row
@@ -3699,20 +3774,25 @@ class PetWindow:
                     has=self._entry_populated(e) if e else False
                     in_month=d.year==y and d.month==m
                     is_today=(d==today)
-                    bg="#FFD2DC" if is_today else ("#F0D9B4" if has else "#FFFCF7")
-                    fg="#C9A86A" if not in_month else ("#5a3e2b" if has or is_today else "#8B7355")
-                    cell=tk.Frame(grid, bg=bg, bd=1 if is_today else 0,
-                                  relief="solid" if is_today else "flat",
-                                  highlightthickness=1 if is_today else 0,
-                                  highlightbackground="#E8A0B5")
+                    c_today="#4a2a2c" if dark else "#FFD2DC"
+                    c_has="#443620" if dark else "#F0D9B4"
+                    c_none="#2e261c" if dark else "#FFFCF7"
+                    ring="#e8c474" if dark else "#E8A0B5"
+                    bg=c_today if is_today else (c_has if has else c_none)
+                    fg="#e8c474" if not in_month else ("#f0e2c4" if (has or is_today) else "#c9b796")
+                    cell=tk.Frame(grid, bg=bg, bd=0,
+                                  relief="flat",
+                                  highlightthickness=2 if is_today else 0,
+                                  highlightbackground=ring)
                     cell.grid(row=r, column=c, sticky="nsew", padx=1, pady=1)
                     tk.Button(cell, text=str(d.day), bg=bg, fg=fg,
                               font=("Segoe UI", 9, "bold" if has else "normal"),
-                              activebackground="#FFDAB9", bd=0, relief="flat", cursor="hand2",
+                              activebackground=("#4e3a24" if dark else "#FFDAB9"), bd=0, relief="flat", cursor="hand2",
                               command=lambda ds=ds: (win.destroy(), on_day(ds) if on_day else None)
                               ).pack(side="top", fill="both", expand=True)
                     if has and mood_by_date.get(ds):
-                        tk.Label(cell, text=mood_by_date[ds], bg=bg, font=("Segoe UI", 8)).pack(side="bottom")
+                        tk.Label(cell, text=mood_by_date[ds], bg=bg, fg=("#e8c474" if dark else "#8B7355"),
+                                 font=("Segoe UI", 8)).pack(side="bottom")
         render_month()
         # mood trend: mini bar by month for last 6 months
         trend_frame=tk.Frame(win, bg="#FFFCF7")
@@ -3732,13 +3812,16 @@ class PetWindow:
             weekly.append((cnt,avg))
         mx=max([x[0] for x in weekly]+[1])
         bar_w=30; gap=13; left0=15; baseline=120
+        bar_muted="#4a3c2e" if dark else "#F3E9D8"
+        bar_fill="#8a5a42" if dark else "#E6A88F"
+        lab_gold="#e8c474" if dark else "#C9A86A"
         for i,(cnt,avg) in enumerate(weekly):
             x=left0+i*(bar_w+gap)
             h=int(cnt/mx*90) if mx else 0
-            tc.create_rectangle(x, baseline-h, x+bar_w, baseline, fill="#E6A88F" if cnt else "#F3E9D8", outline="")
+            tc.create_rectangle(x, baseline-h, x+bar_w, baseline, fill=bar_fill if cnt else bar_muted, outline="")
             if avg:
                 tc.create_text(x+bar_w//2, baseline-h-8, text="♥"*max(1,round(avg)), fill="#FF8FA3", font=("Segoe UI", 6))
-            tc.create_text(x+bar_w//2, baseline+10, text=f"w{i}", fill="#C9A86A", font=("Segoe UI", 6))
+            tc.create_text(x+bar_w//2, baseline+10, text=f"w{i}", fill=lab_gold, font=("Segoe UI", 6))
         # tag breakdown
         tag_counts=Counter()
         for v in data.values():
@@ -3794,16 +3877,41 @@ class PetWindow:
                         if cur_fg.startswith("#"):
                             nf=map_fg.get(cur_fg) or map_bg.get(cur_fg)
                             if nf: w.configure(fg=nf)
+                        try:
+                            ab=str(w.cget("activebackground"))
+                            if ab.startswith("#") and ab in map_bg:
+                                w.configure(activebackground=map_bg[ab])
+                        except: pass
+                        try:
+                            af=str(w.cget("activeforeground"))
+                            if af.startswith("#") and af in map_fg:
+                                w.configure(activeforeground=map_fg[af])
+                        except: pass
                         if isinstance(w, tk.Text):
-                            w.configure(bg=txt_bg, fg=txt_fg, highlightbackground=hl_bg)
+                            w.configure(bg=txt_bg, fg=txt_fg, highlightbackground=hl_bg,
+                                        insertbackground=("#e8c474" if dark else "#6B4C3B"),
+                                        selectbackground=("#4a2a2c" if dark else "#FFDAB9"),
+                                        selectforeground=(txt_fg if dark else "#3a2a1a"),
+                                        inactiveselectbackground=("#4a2a2c" if dark else "#FFDAB9"))
                             for t in w.tag_names():
                                 try:
                                     opts={}
-                                    if dark: opts={"foreground":"#f0e2c4"} if t=="heading" else {}
-                                    if t=="todo_done": opts={"foreground":"#a89a82"}
-                                    if t in ("bold","italic","underline"): opts={}
+                                    if t=="heading": opts={"foreground":"#f0e2c4" if dark else "#6B4C3B"}
+                                    if t=="todo_done" and dark: opts={"foreground":"#a89a82"}
+                                    if t.startswith("link_"): opts={"foreground":"#8ab4f8" if dark else "#0066CC", "underline":True}
                                     if opts: w.tag_configure(t, **opts)
                                 except: pass
+                        elif isinstance(w, tk.Entry):
+                            try:
+                                w.configure(insertbackground=("#e8c474" if dark else "#6B4C3B"),
+                                            selectbackground=("#4a2a2c" if dark else "#FFDAB9"),
+                                            selectforeground=(txt_fg if dark else "#3a2a1a"))
+                            except: pass
+                        elif isinstance(w, tk.Listbox):
+                            try:
+                                w.configure(selectbackground=("#4a2a2c" if dark else "#FFDAB9"),
+                                            selectforeground=("#f0e2c4" if dark else "#5a3e2b"))
+                            except: pass
                     except: pass
                 relabel(w)
         relabel(win)
@@ -4013,11 +4121,11 @@ class PetWindow:
             if line_text.startswith("☐ "):
                 txt.delete(line_start, line_end)
                 txt.insert(line_start, "☑ " + line_text[2:])
-                txt.tag_add("todo_done", line_start, f"{line_start}+{len('☑ ')+len(line_text[2:])}c")
+                txt.tag_add("todo_done", f"{line_start}+2c", f"{line_start}+{len('☑ ')+len(line_text[2:])}c")
             elif line_text.startswith("☑ "):
                 txt.delete(line_start, line_end)
                 txt.insert(line_start, "☐ " + line_text[2:])
-                txt.tag_remove("todo_done", line_start, f"{line_start}+{len('☐ ')+len(line_text[2:])}c")
+                txt.tag_remove("todo_done", f"{line_start}+2c", f"{line_start} lineend")
             else:
                 txt.insert(line_start, "☐ ")
                 txt.tag_remove("todo_done", line_start, f"{line_start} lineend")
