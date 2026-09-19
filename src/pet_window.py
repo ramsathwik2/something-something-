@@ -3198,7 +3198,7 @@ class PetWindow:
             btn=tk.Button(fmt_bar, text=label, width=3, bg="#FFFCF7", fg="#6B4C3B",
                           activebackground="#FFDAB9", activeforeground="#6B4C3B",
                           bd=0, font=("Segoe UI", 9), cursor="hand2",
-                          command=lambda t=tag: self._apply_format(txt, t))
+                          command=lambda t=cmd: (self._apply_format(txt, t), txt.focus_force()))
             btn.pack(side="left", padx=2, pady=2)
         tk.Frame(right, bg="#E6D5B8", height=1).pack(fill="x", padx=8)
         # ---- buttons anchored bottom (packed BEFORE the expanding text area) ----
@@ -3978,7 +3978,6 @@ class PetWindow:
 
     def _toggle_bullet(self, txt):
         try:
-            # Get current line
             line_start = txt.index("insert linestart")
             line_end = txt.index("insert lineend")
             line_text = txt.get(line_start, line_end)
@@ -4005,12 +4004,6 @@ class PetWindow:
                 txt.insert(line_start, "☐ ")
                 txt.tag_remove("todo_done", line_start, f"{line_start} lineend")
         except: pass
-
-    def _toggle_tag(self, txt, tag):
-        if tag in txt.tag_names("sel.first"):
-            txt.tag_remove(tag, "sel.first", "sel.last")
-        else:
-            txt.tag_add(tag, "sel.first", "sel.last")
 
     def _is_dont_sleep(self):
         return time.time() < self._dont_sleep_until

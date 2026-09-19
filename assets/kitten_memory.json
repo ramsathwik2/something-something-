@@ -5,12 +5,12 @@
   "walkCount": 0,
   "foodBegs": 0,
   "lastPet": "2026-09-18T20:29:18.355290",
-  "lastSeen": "2026-09-19T09:07:55.425112",
+  "lastSeen": "2026-09-19T09:19:22.369896",
   "milestones": [
     "pet1"
   ],
   "favorite_spots": [],
-  "pos_x": 664,
+  "pos_x": 634,
   "duck_trigger_source": "code",
   "has_seen_duck_explainer": true,
   "luck_message_index": 2,
