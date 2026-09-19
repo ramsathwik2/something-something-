@@ -288,7 +288,13 @@ class PetWindow:
 
             self.pet_h = PET_H
 
-            self.animator.set_state("sleeping", big=False)
+            if self._is_dont_sleep():
+
+                self.animator.set_state("play", big=False, flip=False)
+
+            else:
+
+                self.animator.set_state("sleeping", big=False)
 
             self.update_position()
 
@@ -940,7 +946,13 @@ class PetWindow:
 
         else:
 
-            self.animator.set_state("sleeping", big=False)
+            if self._is_dont_sleep():
+
+                self.animator.set_state("play", big=False, flip=False)
+
+            else:
+
+                self.animator.set_state("sleeping", big=False)
 
             # little purr stay
 
@@ -1452,7 +1464,13 @@ class PetWindow:
 
             self.pet_w=PET_W; self.pet_h=PET_H
 
-            self.animator.set_state("sleeping", big=False)
+            if self._is_dont_sleep():
+
+                self.animator.set_state("play", big=False, flip=False)
+
+            else:
+
+                self.animator.set_state("sleeping", big=False)
 
             self.update_position()
 
@@ -1556,7 +1574,7 @@ class PetWindow:
 
                             self.animator.set_state("watching", big=False, flip=False)
 
-                            self.root.after(4200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active else None)
+                            self.root.after(4200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
 
                         else:
 
@@ -1837,7 +1855,7 @@ class PetWindow:
                     self._show_bubble(msg, 6000)
                     if not self.is_duck and not self.walk_active:
                         self.animator.set_state("watching", big=False, flip=False)
-                        self.root.after(3200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active else None)
+                        self.root.after(3200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
         except Exception as e:
             print("arch err",e)
         self.root.after(1600, self.arch_check)
@@ -1860,7 +1878,7 @@ class PetWindow:
 
                 self.animator.set_state("watching", big=False, flip=False)
 
-                self.root.after(2800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active else None)
+                self.root.after(2800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
 
 
 
@@ -2272,7 +2290,7 @@ class PetWindow:
 
                     except: pass
 
-                    self.root.after(5200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self.animator.get_state()=="pet" else None)
+                    self.root.after(5200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self.animator.get_state()=="pet" and not self._is_dont_sleep() else None)
 
             name=self.kitten_name or "kitten"
 
@@ -2336,7 +2354,7 @@ class PetWindow:
 
                 self._play_meow()
 
-                self.root.after(4800, lambda: self.animator.set_state("sleeping", big=False, flip=False))
+                self.root.after(4800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
 
                 # also heart burst
 
@@ -2508,7 +2526,7 @@ class PetWindow:
 
         self._play_meow()
 
-        self.root.after(4500, lambda: self.animator.set_state("sleeping", big=False, flip=False))
+        self.root.after(4500, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
 
         print(f"Wish me luck: {msg}")
 
@@ -2542,7 +2560,7 @@ class PetWindow:
 
                         self.animator.set_state("watching", big=False, flip=(dx<0))
 
-                        self.root.after(900, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active else None)
+                        self.root.after(900, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
 
                         print("👀 glance at cursor")
 
@@ -2554,7 +2572,7 @@ class PetWindow:
 
                         self.animator.set_state("blink", big=False, flip=False)
 
-                        self.root.after(600, lambda: self.animator.set_state("sleeping", big=False, flip=False))
+                        self.root.after(600, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
 
         except: pass
 
@@ -2580,7 +2598,7 @@ class PetWindow:
 
                     self.animator.set_state("blink", big=False, flip=False)
 
-                    self.root.after(800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active else None)
+                    self.root.after(800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
 
                     self._show_bubble("missed you… ears down 🥺", 5000)
 
@@ -2622,7 +2640,7 @@ class PetWindow:
 
             self.root.after(1200, lambda: self.animator.set_state("pet", big=False, flip=False))
 
-            self.root.after(3000, lambda: self.animator.set_state("sleeping", big=False, flip=False))
+            self.root.after(3000, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
 
             self._play_meow()
 
@@ -3441,7 +3459,7 @@ class PetWindow:
                 try:
                     datetime.date.fromisoformat(ans)
                 except:
-                    self._show_bubble("That date looks wrong, darling — use YYYY-MM-DD", 3000); return
+                    self._show_bubble("Hmm, that date is a bit silly — try YYYY-MM-DD 🐾", 3000); return
                 if ans==d: return
                 import tkinter.messagebox as mb
                 existing=data.get(ans)
@@ -3481,7 +3499,7 @@ class PetWindow:
             ans=ans.strip()
             try: datetime.date.fromisoformat(ans)
             except:
-                self._show_bubble("Use YYYY-MM-DD, darling", 3000); return
+                self._show_bubble("Hmm, that date is a bit silly — try YYYY-MM-DD 🐾", 3000); return
             if not self._entry_populated(data.get(ans)) and ans in data:
                 pass
             if ans not in data: data[ans]={}
@@ -4038,13 +4056,15 @@ class PetWindow:
 
             self._dont_sleep_until=time.time()+30*60
 
-            try: self.menu.entryconfig(7, label="Don't sleep ✓ (30m)")
+            try: self.menu.entryconfig(8, label="Don't sleep ✓ (30m)")
 
             except: pass
 
             self._show_bubble("I won't sleep for 30m! ☕", 4000)
 
-            self.animator.set_state("play", big=False, flip=False)
+            if not self.is_duck:
+
+                self.animator.set_state("play", big=False, flip=False)
 
             self._play_meow("chirp")
 
