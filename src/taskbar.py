@@ -77,8 +77,6 @@ def calc_position(pet_w, pet_h, placement="above"):
     else: # overlay
         if edge == "bottom":
             # overlap: bottom of pet aligns with screen bottom, centered vertically on taskbar
-            y = b - pet_h + (tb_h - pet_h)//2 + 6  # tweak to sit on bar
-            # clamp to not go off-screen: simpler sit ON bar
             y = sh - pet_h - 2  # exactly on bottom edge overlapping bar
         elif edge == "top":
             y = t + (tb_h - pet_h)//2

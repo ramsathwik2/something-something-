@@ -20,6 +20,17 @@ from taskbar import calc_position, get_taskbar_edge, get_taskbar_rect, get_scree
 
 import memory as mem
 
+# Best-effort Latin-1 mapping so PDF export keeps accents/emojis readable
+_PDF_TRANSLIT={
+    "'":"'", "’":"'", "“":"\"", "”":"\"", "–":"-", "—":"-", "…":"...",
+    "é":"e","è":"e","ê":"e","ë":"e","á":"a","à":"a","â":"a","ä":"a","ã":"a","å":"a",
+    "í":"i","ì":"i","î":"i","ï":"i","ó":"o","ò":"o","ô":"o","ö":"o","õ":"o",
+    "ú":"u","ù":"u","û":"u","ü":"u","ñ":"n","ç":"c","Ç":"C","É":"E","À":"A","È":"E","Ü":"U","Ö":"O","Á":"A","Í":"I","Ó":"O","Ú":"U",
+    "œ":"oe","æ":"ae","ß":"ss",
+    "♥":"*","·":"-","•":"*","✦":"*","★":"*","☆":"*","☑":"[x]","☐":"[ ]","✓":"v",
+    "🔥":"*","💖":"*","💌":"*","🐾":"*","📖":"*","📊":"*","😍":"*","😊":"*","😐":"*","😢":"*","😤":"*","🌙":"*","✨":"*","♡":"*","📷":"*","💘":"*","🎄":"*","🎃":"*","🔒":"*","🔍":"*","🗓":"*","💾":"*","📄":"*","✎":"*","🗑":"*","📤":"*","⏰":"*","📝":"*","🔗":"*","🎨":"*","📋":"*","☑":"[x]",
+}
+
 
 
 PET_W=56
@@ -131,6 +142,18 @@ class PetWindow:
 
         self.last_activity = time.time()
 
+        self._modal_open = False
+
+        self._startup_greeted = False
+
+        self._ui_queue = []
+
+        self._last_sound_ts = 0
+
+        self._journal_read_error = False
+
+        self._unlock_fails = 0
+
 
 
         self.menu = tk.Menu(self.root, tearoff=0)
@@ -238,6 +261,46 @@ class PetWindow:
 
         self.root.after(10000, self.wish_11_check)
         self.root.after(15000, self.check_journal_reminder)
+
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+
+        self.root.after(300, self._drain_ui)
+    def post_ui(self, fn):
+        try:
+            self._ui_queue.append(fn)
+        except Exception:
+            pass
+
+    def _drain_ui(self):
+        try:
+            q=self._ui_queue
+            self._ui_queue=[]
+            for fn in q:
+                try: fn()
+                except Exception as _e: _LOGGER.error("ui cb: %s", _e)
+        except Exception as _e:
+            _LOGGER.error("drain ui: %s", _e)
+        try:
+            self.root.after(300, self._drain_ui)
+        except Exception:
+            pass
+
+    def _base_dir(self):
+        import sys as _sys
+        if getattr(_sys, 'frozen', False):
+            return pathlib.Path(getattr(_sys, '_MEIPASS', pathlib.Path(__file__).parent.parent))
+        return pathlib.Path(__file__).parent.parent
+
+    def _ready_for_transition(self):
+        return not self.walk_active and not self.is_petting and not self.is_duck and not self._modal_open
+
+    def _restore_geom(self, w, h, dx=0, dy=0):
+        try:
+            x=self.root.winfo_x(); y=self.root.winfo_y()
+            self.root.geometry(f"{w}x{h}+{x+dx}+{y+dy}")
+        except Exception:
+            pass
+
     def set_placement(self, mode):
 
         if self.is_duck:
@@ -268,37 +331,13 @@ class PetWindow:
 
             sw,sh = get_screen_size()
 
-            # side middle (right side, centered vertical)
-
             x = sw - BIG_W - 12
 
             y = sh//2 - BIG_H//2
 
-            # ensure not behind maxized windows? keep topmost
-
             self.root.geometry(f"{BIG_W}x{BIG_H}+{x}+{y}")
 
-            # speech bubble via tooltip window? simple print
-
-            print("🦆 Duck mode: kitten is bigger on side, ready to rubber-duck your code")
-
-        else:
-
-            self.pet_w = PET_W
-
-            self.pet_h = PET_H
-
-            if self._is_dont_sleep():
-
-                self.animator.set_state("play", big=False, flip=False)
-
-            else:
-
-                self.animator.set_state("sleeping", big=False)
-
-            self.update_position()
-
-            print("Duck mode off -> back to taskbar")
+            _LOGGER.info("duck mode enabled")
 
 
 
@@ -402,31 +441,37 @@ class PetWindow:
 
         if state == "sleeping" and not self.is_duck and not self.walk_active and not self.is_petting:
 
-            # architecture idle easter egg 3% : blueprint nap hint
+            # architecture idle easter egg 3% : blueprint nap hint (90s cooldown)
 
-            if random.random()<0.03:
+            if random.random()<0.03 and time.time()-getattr(self,"_last_nap_bubble",0)>90:
+
+                self._last_nap_bubble=time.time()
 
                 self._show_bubble("📐 *blueprint nap* Zzz", 3000)
 
-            if random.random() < 0.78 and self.animator.idx % 2 == 0:
+        try:
 
-                pil = self.animator.frames[0] if not self.animator.is_big else self.animator.frames_big[0]
+            tk_img, delay, size = self.animator.next_frame()
 
-                tk_img = self.animator._to_tk(pil)
+            self._tk_img_ref = tk_img
 
-                self._tk_img_ref = tk_img
+            self.label.configure(image=tk_img)
 
-                self.label.configure(image=tk_img)
+        except Exception as _e:
 
-                self._anim_after = self.root.after(random.randint(1900,3200), self.animate)
+            _LOGGER.error("animate tick: %s", _e)
 
-                return
+            # don't kill the flywheel on one bad frame
 
-        tk_img, delay, size = self.animator.next_frame()
+            try:
+                if self._anim_after:
+                    self.root.after_cancel(self._anim_after)
+            except Exception: pass
+            self._anim_after=None
 
-        self._tk_img_ref = tk_img
+            self._anim_after = self.root.after(600, self.animate)
 
-        self.label.configure(image=tk_img)
+            return
 
         if size != self.pet_w:
 
@@ -588,11 +633,11 @@ class PetWindow:
 
             self._notice_beat(lambda: self.animator.set_state("stretch", big=False, flip=False), ms=220)
 
-            self.root.after(1800, lambda: self.animator.set_state("groom", big=False, flip=False) if not self.walk_active else None)
+            self.root.after(1800, lambda: self.animator.set_state("groom", big=False, flip=False) if self._ready_for_transition() else None)
 
             end_state="play" if is_awake else "sleeping"
 
-            self.root.after(4200, lambda: self.animator.set_state(end_state, big=False, flip=False) if not self.walk_active else None)
+            self.root.after(4200, lambda: self.animator.set_state(end_state, big=False, flip=False) if self._ready_for_transition() else None)
 
         elif r < 0.40:
 
@@ -600,11 +645,11 @@ class PetWindow:
 
             self.animator.set_state("loaf", big=False, flip=False)
 
-            self.root.after(3600, lambda: self.animator.set_state("watching", big=False, flip=False))
+            self.root.after(3600, lambda: self.animator.set_state("watching", big=False, flip=False) if self._ready_for_transition() else None)
 
             end_state="play" if is_awake else "sleeping"
 
-            self.root.after(6800, lambda: self.animator.set_state(end_state, big=False, flip=False) if not self.walk_active else None)
+            self.root.after(6800, lambda: self.animator.set_state(end_state, big=False, flip=False) if self._ready_for_transition() else None)
 
         elif r < 0.62:
 
@@ -614,11 +659,11 @@ class PetWindow:
 
             self._show_bubble("lick lick ✨", 2200)
 
-            self.root.after(3800, lambda: self.animator.set_state("blink", big=False, flip=False))
+            self.root.after(3800, lambda: self.animator.set_state("blink", big=False, flip=False) if self._ready_for_transition() else None)
 
             end_state="play" if is_awake else "sleeping"
 
-            self.root.after(5200, lambda: self.animator.set_state(end_state, big=False, flip=False) if not self.walk_active else None)
+            self.root.after(5200, lambda: self.animator.set_state(end_state, big=False, flip=False) if self._ready_for_transition() else None)
 
         elif r < 0.78:
 
@@ -630,7 +675,7 @@ class PetWindow:
 
             end_state="play" if is_awake else "sleeping"
 
-            self.root.after(4000, lambda: self.animator.set_state(end_state, big=False, flip=False) if not self.walk_active else None)
+            self.root.after(4000, lambda: self.animator.set_state(end_state, big=False, flip=False) if self._ready_for_transition() else None)
 
         else:
 
@@ -638,11 +683,11 @@ class PetWindow:
 
             self.animator.set_state("play", big=False, flip=False)
 
-            self.root.after(2200, lambda: self.animator.set_state("watching", big=False, flip=False))
+            self.root.after(2200, lambda: self.animator.set_state("watching", big=False, flip=False) if self._ready_for_transition() else None)
 
             end_state="play" if is_awake else "sleeping"
 
-            self.root.after(4600, lambda: self.animator.set_state(end_state, big=False, flip=False) if not self.walk_active else None)
+            self.root.after(4600, lambda: self.animator.set_state(end_state, big=False, flip=False) if self._ready_for_transition() else None)
 
         self.last_activity=time.time()-random.randint(2,6) if is_awake else time.time()-random.randint(3,8)
 
@@ -653,6 +698,12 @@ class PetWindow:
         if self.is_duck or self.walk_active: return
 
         _LOGGER.info("walk to %s", target_x)
+
+        if self.walk_x is None:
+
+            x0,_=calc_position(self.pet_w, self.pet_h, self.placement)
+
+            self.walk_x=self._clamp_x(x0)
 
         try:
 
@@ -672,6 +723,8 @@ class PetWindow:
 
         self._walk_target=target_x
 
+        self._walk_bob=0
+
         # keep the animation flywheel alive (spot-walk must show real walk frames)
 
         self._anim_after = self.root.after(10, self.animate)
@@ -686,6 +739,16 @@ class PetWindow:
 
             self.walk_active=False; self._walk_after=None; return
 
+        # guard: fresh installs have no walk_x yet -> normalize once
+
+        if self.walk_x is None:
+
+            x0,_=calc_position(self.pet_w, self.pet_h, self.placement)
+
+            self.walk_x=self._clamp_x(x0)
+
+            if self.walk_x is None: self.walk_x=x0
+
         # clamp target into the shared taskbar lane
 
         min_x, max_x = self._lane_bounds()
@@ -699,6 +762,8 @@ class PetWindow:
             self.walk_x = self._walk_target
 
             _, y = calc_position(self.pet_w, self.pet_h, self.placement)
+
+            y += 6 if self._is_fullscreen() else 0
 
             self.root.geometry(f"{self.pet_w}x{self.pet_h}+{int(self.walk_x)}+{y}")
 
@@ -724,13 +789,15 @@ class PetWindow:
 
         if self.walk_x > max_x: self.walk_x=max_x
 
+        tuck=6 if self._is_fullscreen() else 0
+
         _, y = calc_position(self.pet_w, self.pet_h, self.placement)
 
         self._walk_bob=(self._walk_bob+1)%4; bob_y=1 if self._walk_bob in (1,2) else 0
 
         if self._walk_bob==2: bob_y=2
 
-        self.root.geometry(f"{self.pet_w}x{self.pet_h}+{int(self.walk_x)}+{y - bob_y}")
+        self.root.geometry(f"{self.pet_w}x{self.pet_h}+{int(self.walk_x)}+{y + tuck - bob_y}")
 
         if self._walk_bob%4==0: self._save_pos()
 
@@ -748,7 +815,11 @@ class PetWindow:
             sw,_=get_screen_size()
             return 2, sw-self.pet_w-2
         except:
-            return 2, 2000000
+            try:
+                sw,_=get_screen_size()
+                return 2, sw-self.pet_w-2
+            except:
+                return 2, 2000000
 
     def _clamp_x(self, x):
         """Clamp x into the walk lane shared by trigger_walk/_walk_step/_walk_to_step. None-safe."""
@@ -800,6 +871,8 @@ class PetWindow:
 
         self._walk_steps=0; self._walk_bounces=0
 
+        self._walk_bob=0
+
         self._anim_after = self.root.after(10, self.animate)
 
         self._walk_step()
@@ -837,6 +910,8 @@ class PetWindow:
         self.walk_x = new_x
 
         _, task_y = calc_position(self.pet_w, self.pet_h, self.placement)
+
+        task_y += 6 if self._is_fullscreen() else 0
 
         self._walk_bob = (self._walk_bob+1)%4; bob_y=1 if self._walk_bob in (1,2) else 0
 
@@ -886,7 +961,7 @@ class PetWindow:
 
     def trigger_pet(self):
 
-        if self._long_absence_done:
+        if self._long_absence_done and not self.is_petting:
 
             self._welcome_back()
 
@@ -956,7 +1031,7 @@ class PetWindow:
 
                 self.root.geometry(f"{pop_w}x{pop_h}+{x}+{y}")
 
-                self.root.after(160, lambda: self.root.geometry(f"{orig_w}x{orig_h}+{x}+{y+ (pop_h-orig_h)}"))
+                self.root.after(160, lambda: self._restore_geom(orig_w, orig_h, 0, (pop_h-orig_h)))
 
             except: pass
 
@@ -1022,9 +1097,9 @@ class PetWindow:
 
             x = e.x_root - self.pet_w//2 if hasattr(e,'x_root') else self.root.winfo_x() + e.x - self.pet_w//2
 
-            sw,_=get_screen_size()
+            min_x, max_x = self._lane_bounds()
 
-            x=max(8, min(sw - self.pet_w - 8, x))
+            x=max(min_x, min(max_x, x))
 
             _, y = calc_position(self.pet_w, self.pet_h, self.placement)
 
@@ -1038,13 +1113,15 @@ class PetWindow:
 
             self.animator.set_state("watching", big=False, flip=False)
 
-            self.root.after(1200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
+            self.root.after(1200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
             self.last_activity=time.time() - 12
 
             self.bored_since=time.time()
 
             if hasattr(self,'_walk_steps'): self._walk_steps=0
+
+            if hasattr(self,'_walk_bounces'): self._walk_bounces=0
 
         except Exception as e:
 
@@ -1190,7 +1267,7 @@ class PetWindow:
 
         "The building is taking shape because of you",
 
-        "Your effort today is tomorrow s portfolio",
+        "Your effort today is tomorrow's portfolio",
 
         "You have got the eye - now trust the hand",
 
@@ -1538,7 +1615,7 @@ class PetWindow:
 
             self.last_activity=time.time()
 
-        elif not should and self.is_duck:
+        elif not should and self.is_duck and not self.is_petting:
 
             # tuck the second you close the tool (was 14s)
 
@@ -1604,7 +1681,7 @@ class PetWindow:
 
                             self.animator.set_state("watching", big=False, flip=False)
 
-                            self.root.after(4200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
+                            self.root.after(4200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
                         else:
 
@@ -1857,13 +1934,17 @@ class PetWindow:
 
                     self._show_food_bubble(word)
 
+                    # always keep the animation flywheel alive (duck mode has no trigger_walk)
+
+                    self._anim_after=self.root.after(10, self.animate)
+
                     if not self.is_duck:
 
                         self.bored_since=now
 
                         self.root.after(180, self.trigger_walk)
 
-                    self.root.after(4800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self.animator.get_state()=="pet" and not self._is_dont_sleep() else None)
+                    self.root.after(4800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self.animator.get_state()=="pet" and not self._is_dont_sleep() and not self.is_duck else None)
 
         except Exception as e:
 
@@ -1879,13 +1960,14 @@ class PetWindow:
                 if is_arch and word != getattr(self,'_last_arch_word',None):
                     self._last_arch=now; self._last_arch_word=word
                     print(f"arch google '{word}' -> motivational quote")
-                    idx=self.memory.get("luck_message_index",0)
+                    try: idx=int(self.memory.get("luck_message_index",0) or 0)
+                    except: idx=0
                     msg=self.LUCK_MESSAGES[idx % len(self.LUCK_MESSAGES)]
                     self.memory["luck_message_index"]=(idx+1)%len(self.LUCK_MESSAGES); mem.save(self.memory)
                     self._show_bubble(msg, 6000)
-                    if not self.is_duck and not self.walk_active:
+                    if not self.is_duck and not self.walk_active and not self.is_petting:
                         self.animator.set_state("watching", big=False, flip=False)
-                        self.root.after(3200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
+                        self.root.after(3200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
         except Exception as e:
             print("arch err",e)
         self.root.after(1600, self.arch_check)
@@ -1908,7 +1990,7 @@ class PetWindow:
 
                 self.animator.set_state("watching", big=False, flip=False)
 
-                self.root.after(2800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
+                self.root.after(2800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
 
 
@@ -1921,6 +2003,8 @@ class PetWindow:
             return
 
         self._name_pending=True
+
+        self._modal_open=True
 
         # beautiful gift-style dialog: soft parchment #FFF8DC, rounded card via Canvas, shadow
 
@@ -1994,11 +2078,11 @@ class PetWindow:
 
             import pathlib as _pl
 
-            pth=_pl.Path(__file__).parent.parent / "assets" / "sprites" / "frame_4.png"
+            pth=self._base_dir()/ "assets" / "sprites" / "frame_4.png"
 
             if not pth.exists():
 
-                pth=_pl.Path(r"D:\KITTY\assets\sprites\frame_4.png")
+                pth=_pl.Path(__file__).parent.parent / "assets" / "sprites" / "frame_4.png"
 
             im=Image.open(pth).convert("RGBA").resize((72,72), Image.LANCZOS)
 
@@ -2008,13 +2092,19 @@ class PetWindow:
 
         except Exception:
 
-            try:
+            if pth.exists():
 
-                tk_img=tk.PhotoImage(file=r"D:\KITTY\assets\sprites\frame_4.png")
+                try:
 
-                dlg._kitten_img=tk_img
+                    tk_img=tk.PhotoImage(file=str(pth))
 
-            except Exception:
+                    dlg._kitten_img=tk_img
+
+                except Exception:
+
+                    tk_img=None
+
+            else:
 
                 tk_img=None
 
@@ -2095,6 +2185,7 @@ class PetWindow:
             except: pass
             self._show_bubble(f"Hi, I'm {name}! <3", 5000)
             self._name_pending=False
+            self._modal_open=False
 
         # pink button #FF8FA3 hover, paw emoji, shadow
 
@@ -2168,9 +2259,15 @@ class PetWindow:
 
 
 
-    def _show_bubble(self, text, ms=4000):
+    def _show_bubble(self, text, ms=4000, priority=0):
 
         try:
+
+            cur=getattr(self, "_bubble_prio", None)
+
+            if cur is not None and cur > priority and self._food_bubble is not None and self._food_bubble.winfo_exists():
+
+                return
 
             if getattr(self, "_food_bubble", None) and self._food_bubble and self._food_bubble.winfo_exists():
 
@@ -2182,7 +2279,7 @@ class PetWindow:
 
             bub.overrideredirect(True); bub.attributes("-topmost", True); bub.configure(bg="#FFF8DC")
 
-            lab=tk.Label(bub, text=text, bg="#FFF8DC", fg="#5a3e2b", font=("Segoe UI",9,"bold"), padx=10, pady=6, bd=1, relief="solid")
+            lab=tk.Label(bub, text=text, bg="#FFF8DC", fg="#5a3e2b", font=("Segoe UI",9,"bold"), padx=10, pady=6, bd=1, relief="solid", wraplength=280, justify="center")
 
             lab.pack()
 
@@ -2202,46 +2299,50 @@ class PetWindow:
 
             self._food_bubble=bub
 
-            self.root.after(ms, lambda: bub.destroy() if bub.winfo_exists() else None)
+            self._bubble_prio=priority
+
+            if getattr(self, "_bubble_after", None):
+
+                try: self.root.after_cancel(self._bubble_after)
+
+                except: pass
+
+                self._bubble_after=None
+
+            self._bubble_after=self.root.after(ms, self._destroy_bubble)
 
         except: pass
+
+    def _destroy_bubble(self):
+
+        try:
+            b=getattr(self,"_food_bubble",None)
+            if b is not None and b.winfo_exists(): b.destroy()
+        except Exception:
+            pass
+        self._food_bubble=None
+        self._bubble_after=None
+        self._bubble_prio=None
 
 
 
     def _play_meow(self, kind="meow"):
-        if self.memory.get("is_muted"):
-            print("muted"); return
-        def _do():
-            try:
-                import pathlib
-                import sys as _sys
-                base = pathlib.Path(_sys._MEIPASS) if getattr(_sys, 'frozen', False) else pathlib.Path(__file__).parent.parent  # type: ignore
-                mp3 = base / "assets" / "cat-purr-meow.mp3"
-                if not mp3.exists():
-                    mp3 = pathlib.Path(r"F:\edr-cat-purr-meow-8327.mp3")
-                # prefer pygame for MP3, fallback to winsound
-                played=False
-                try:
-                    import pygame  # type: ignore
-                    if not pygame.mixer.get_init():
-                        pygame.mixer.init()
-                    pygame.mixer.music.load(str(mp3))
-                    pygame.mixer.music.play()
-                    played=True
-                except: pass
-                if not played:
-                    try:
-                        import winsound
-                        winsound.PlaySound(str(mp3), winsound.SND_FILENAME | winsound.SND_ASYNC)
-                        played=True
-                    except: pass
-                if not played:
-                    import winsound
-                    winsound.Beep(880, 110); winsound.Beep(1046, 140)
-            except: pass
-            print(f"sound {kind} meow mp3")
-        import threading
-        threading.Thread(target=_do, daemon=True).start()
+        try:
+            if self.memory.get("is_muted"):
+                return
+            now=time.time()
+            if now - getattr(self, "_last_sound_ts", 0) < 1.0:
+                return
+            self._last_sound_ts=now
+            wav = self._base_dir() / "assets" / "meow.wav"
+            if not wav.exists():
+                _LOGGER.warning("meow.wav not bundled; sound disabled")
+                return
+            # winsound plays WAV natively (MP3 is not supported by PlaySound)
+            import winsound
+            winsound.PlaySound(str(wav), winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception as _e:
+            _LOGGER.error("sound err: %s", _e)
 
 
     def toggle_mute(self):
@@ -2259,6 +2360,20 @@ class PetWindow:
             self.menu.entryconfig(9, label=new_lab)
 
         except: pass
+
+        try:
+
+            ts=getattr(self, "tray_state", None)
+
+            if ts is not None: ts["muted"]=bool(self.memory.get("is_muted"))
+
+            if getattr(self, "tray_icon", None) and self.tray_icon:
+
+                self.tray_icon.update_menu()
+
+        except Exception:
+
+            pass
 
         print(f"mute toggle -> {state}")
 
@@ -2290,37 +2405,15 @@ class PetWindow:
 
             m=self.memory.get("milestones",[])
 
+            fired_msgs=[]
+
             def trigger(mid, msg):
 
                 if mid not in m:
 
                     m.append(mid); self.memory["milestones"]=m; mem.save(self.memory)
 
-                    self._show_bubble(msg, 6000)
-
-                    # heart burst: big pet then bounce
-
-                    self.animator.set_state("pet", big=self.is_duck)
-
-                    self._play_meow()
-
-                    # pop size burst
-
-                    try:
-
-                        ow,oh=self.pet_w,self.pet_h
-
-                        pw,ph=int(ow*1.28), int(oh*1.28)
-
-                        x=self.root.winfo_x(); y=self.root.winfo_y()-(ph-oh)
-
-                        self.root.geometry(f"{pw}x{ph}+{x}+{y}")
-
-                        self.root.after(320, lambda: self.root.geometry(f"{ow}x{oh}+{x}+{y+(ph-oh)}"))
-
-                    except: pass
-
-                    self.root.after(5200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self.animator.get_state()=="pet" and not self._is_dont_sleep() else None)
+                    fired_msgs.append(msg)
 
             name=self.kitten_name or "kitten"
 
@@ -2343,6 +2436,32 @@ class PetWindow:
                 if days>=7 and "week1" not in m: trigger("week1", f"1 week together! {name} missed you ♡")
 
                 if days>=30 and "month1" not in m: trigger("month1", f"1 month with {name}! 💌")
+
+            if fired_msgs and not self.is_duck:
+
+                self.animator.set_state("pet", big=False)
+
+                self._play_meow()
+
+                self._show_bubble("; ".join(fired_msgs), 6000, priority=1)
+
+                # pop size burst (single, not per milestone)
+
+                try:
+
+                    ow,oh=self.pet_w,self.pet_h
+
+                    pw,ph=int(ow*1.28), int(oh*1.28)
+
+                    x=self.root.winfo_x(); y=self.root.winfo_y()-(ph-oh)
+
+                    self.root.geometry(f"{pw}x{ph}+{x}+{y}")
+
+                    self.root.after(320, lambda: self._restore_geom(ow,oh,0,(ph-oh)))
+
+                except: pass
+
+                self.root.after(5200, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self.animator.get_state()=="pet" and not self._is_dont_sleep() else None)
 
         except Exception as e:
 
@@ -2378,17 +2497,21 @@ class PetWindow:
 
                 print(f"🥺 missed you for {d} days -> big greeting")
 
+                self._startup_greeted=True
+
                 self._show_bubble(f"Missed you! 💌", 5000)
 
-                self.animator.set_state("pet", big=False, flip=False)
+                self.animator.set_state("pet", big=self.is_duck)
 
                 self._play_meow()
 
-                self.root.after(4800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
+                self.root.after(4800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
                 # also heart burst
 
             elif d==1 and not self.walk_active:
+
+                self._startup_greeted=True
 
                 self._show_bubble(f"Hi again ♡", 3200)
 
@@ -2416,7 +2539,13 @@ class PetWindow:
 
             if msg and random.random()<0.15:
 
-                self._show_bubble(msg, 5000)
+                key="season_{0}_{1}".format(now.year, msg)
+
+                if self.memory.get(key) != msg and self._ready_for_transition():
+
+                    self.memory[key]=msg; mem.save(self.memory)
+
+                    self._show_bubble(msg, 5000, priority=1)
 
         except: pass
 
@@ -2433,7 +2562,7 @@ class PetWindow:
                 if self._last_wish_slot != slot:
                     self._last_wish_slot=slot
                     ampm="AM" if now.hour==11 else "PM"
-                    self._show_bubble(f"11:11 {ampm} -- make a wish", 7000)
+                    self._show_bubble(f"11:11 {ampm} -- make a wish", 7000, priority=1)
                     self._play_meow("chirp")
                     print(f"11:11 wish {ampm}")
         except: pass
@@ -2476,9 +2605,11 @@ class PetWindow:
 
                 self._show_bubble("waiting for you…", 3800)
 
+                self.last_activity=time.time()
+
                 print("waiting bubble only - no drift while sleeping")
 
-                self.root.after(6000, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
+                self.root.after(6000, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
         except: pass
 
@@ -2514,11 +2645,15 @@ class PetWindow:
 
         try:
 
-            prev=self.animator.get_state()
+            if getattr(self, "_notice_after", None):
+
+                try: self.root.after_cancel(self._notice_after)
+
+                except: pass
 
             self.animator.set_state("blink", big=self.is_duck)
 
-            self.root.after(ms, lambda: callback())
+            self._notice_after=self.root.after(ms, lambda: callback())
 
         except:
 
@@ -2548,7 +2683,9 @@ class PetWindow:
 
             except: pass
 
-        idx=self.memory.get("luck_message_index",0)
+        try: idx=int(self.memory.get("luck_message_index",0) or 0)
+
+        except: idx=0
 
         msgs=self.LUCK_MESSAGES
 
@@ -2556,7 +2693,7 @@ class PetWindow:
 
         self.memory["luck_message_index"]=(idx+1)%len(msgs); mem.save(self.memory)
 
-        self._notice_beat(lambda: self._show_bubble(msg, 5000))
+        self._notice_beat(lambda: self._show_bubble(msg, 5000, priority=1))
 
         self.animator.set_state("pet", big=self.is_duck)
 
@@ -2570,13 +2707,13 @@ class PetWindow:
 
             self.root.geometry(f"{pw}x{ph}+{x}+{y}")
 
-            self.root.after(260, lambda: self.root.geometry(f"{ow}x{oh}+{x}+{y+(ph-oh)}"))
+            self.root.after(260, lambda: self._restore_geom(ow,oh,0,(ph-oh)))
 
         except: pass
 
         self._play_meow()
 
-        self.root.after(4500, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
+        self.root.after(4500, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
         print(f"Wish me luck: {msg}")
 
@@ -2610,7 +2747,7 @@ class PetWindow:
 
                         self.animator.set_state("watching", big=False, flip=(dx<0))
 
-                        self.root.after(900, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
+                        self.root.after(900, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
                         print("👀 glance at cursor")
 
@@ -2622,7 +2759,7 @@ class PetWindow:
 
                         self.animator.set_state("blink", big=False, flip=False)
 
-                        self.root.after(600, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
+                        self.root.after(600, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
         except: pass
 
@@ -2648,9 +2785,11 @@ class PetWindow:
 
                     self.animator.set_state("blink", big=False, flip=False)
 
-                    self.root.after(800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self.walk_active and not self._is_dont_sleep() else None)
+                    self.root.after(800, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
 
-                    self._show_bubble("missed you… ears down 🥺", 5000)
+                    if not getattr(self, "_startup_greeted", False):
+
+                        self._show_bubble("missed you… ears down 🥺", 5000)
 
                     print("💤 long absence: missing you state")
 
@@ -2670,29 +2809,33 @@ class PetWindow:
 
             self._show_bubble("you're back! hop! 💖", 4500)
 
-            self.animator.set_state("waking", big=False, flip=False)
+            if not self.is_duck:
 
-            try:
+                self.animator.set_state("waking", big=False, flip=False)
 
-                ow,oh=self.pet_w,self.pet_h; pw,ph=int(ow*1.25),int(oh*1.25)
+                try:
 
-                x=self.root.winfo_x(); y=self.root.winfo_y()-(ph-oh)-6
+                    ow,oh=self.pet_w,self.pet_h; pw,ph=int(ow*1.25),int(oh*1.25)
 
-                self.root.geometry(f"{pw}x{ph}+{x}+{y}")
+                    x=self.root.winfo_x(); y=self.root.winfo_y()-(ph-oh)-6
 
-                self.root.after(180, lambda: self.root.geometry(f"{ow}x{oh}+{x}+{y+(ph-oh)+6}"))
+                    self.root.geometry(f"{pw}x{ph}+{x}+{y}")
 
-                self.root.after(350, lambda: self.root.geometry(f"{pw}x{ph}+{x}+{y}"))
+                    self.root.after(180, lambda: self._restore_geom(ow,oh,0,(ph-oh)+6))
 
-                self.root.after(530, lambda: self.root.geometry(f"{ow}x{oh}+{x}+{y+(ph-oh)+6}"))
+                    self.root.after(350, lambda: self._restore_geom(pw,ph,0,-(ph-oh)-6))
 
-            except: pass
+                    self.root.after(530, lambda: self._restore_geom(ow,oh,0,(ph-oh)+6))
 
-            self.root.after(1200, lambda: self.animator.set_state("pet", big=False, flip=False))
+                except: pass
 
-            self.root.after(3000, lambda: self.animator.set_state("sleeping", big=False, flip=False) if not self._is_dont_sleep() else None)
+                self.root.after(1200, lambda: self.animator.set_state("pet", big=False, flip=False) if not self.is_duck else None)
 
-            self._play_meow()
+                self.root.after(3000, lambda: self.animator.set_state("sleeping", big=False, flip=False) if self._ready_for_transition() and not self._is_dont_sleep() else None)
+
+                self._play_meow()
+
+                self._startup_greeted=True
 
             print("welcome back hop!")
 
@@ -2766,12 +2909,72 @@ class PetWindow:
             d=pathlib.Path(__file__).parent.parent / "assets"
         d.mkdir(parents=True, exist_ok=True)
         jp=d / "journal.json"
-        # migrate old
-        old=pathlib.Path(__file__).parent.parent / "assets" / "journal.json"
-        if not jp.exists() and old.exists():
-            try: jp.write_text(old.read_text(encoding='utf-8'), encoding='utf-8')
-            except: pass
+        if not getattr(self, "_journal_migrated", False):
+            self._journal_migrated=True
+            self._migrate_legacy_journal(jp, d/"journal_photos")
         return jp
+
+    def _migrate_legacy_journal(self, jp, photos_dir):
+        """Fold the dev-tree assets/journal.json (+ photos) into the active store
+        exactly once. Existing active entries always win on conflict."""
+        import json
+        old=pathlib.Path(__file__).parent.parent / "assets" / "journal.json"
+        if not old.exists():
+            self._merge_legacy_photos(photos_dir)
+            return
+        changed=False
+        try:
+            old_data=json.loads(old.read_text(encoding='utf-8'))
+        except Exception:
+            old_data={}
+        new_data={}
+        if jp.exists():
+            try:
+                new_data=json.loads(jp.read_text(encoding='utf-8'))
+            except Exception:
+                new_data={}
+        elif old_data:
+            try:
+                jp.write_text(json.dumps(old_data, ensure_ascii=False, indent=2), encoding='utf-8')
+            except Exception:
+                pass
+            self._merge_legacy_photos(photos_dir)
+            return
+        if jp.exists() and old_data:
+            for k,v in old_data.items():
+                if k not in new_data:
+                    new_data[k]=v; changed=True
+                elif v and isinstance(v, dict) and isinstance(new_data[k], dict):
+                    # keep the richer side field-by-field, never drop old fields
+                    merged=dict(new_data[k])
+                    for fk,fv in v.items():
+                        merged.setdefault(fk, fv)
+                    if merged!=new_data[k]:
+                        new_data[k]=merged; changed=True
+            if changed:
+                self._save_journal(new_data)
+        self._merge_legacy_photos(photos_dir)
+
+    def _merge_legacy_photos(self, photos_dir):
+        old_dir=pathlib.Path(__file__).parent.parent / "assets" / "journal_photos"
+        if not old_dir.exists():
+            return
+        try:
+            old_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            photos_dir.mkdir(parents=True, exist_ok=True)
+            import shutil
+            for f in old_dir.iterdir():
+                if not f.is_file():
+                    continue
+                dest=photos_dir/f.name
+                if not dest.exists():
+                    try: shutil.copy2(f, dest)
+                    except Exception: pass
+        except Exception as _e:
+            _LOGGER.error("photos migration: %s", _e)
 
     # ---- password lock + encryption (Fernet via cryptography) ----
     def _journal_lock_path(self):
@@ -2782,12 +2985,6 @@ class PetWindow:
 
     def _journal_locked(self):
         return self._journal_lock_path().exists()
-
-    def _journal_derive(self, password):
-        import hashlib, base64
-        salt=self._journal_lock_path().read_bytes()[:16]
-        key=hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
-        return base64.urlsafe_b64encode(key)
 
     def _journal_unlock(self, password):
         import hashlib, hmac, json
@@ -2821,37 +3018,72 @@ class PetWindow:
         return json.loads(f.decrypt(blob).decode("utf-8"))
 
     def _journal_set_password(self, password):
-        import hashlib, hmac, json, base64
-        if len(password)<4:
+        import hashlib, json, base64, secrets
+        if len(password)<6:
             return False
-        salt=bytes(bytearray([1,35,69,103,137,171,205,239,7,29,51,73,95,117,139,161]))
-        salt=hashlib.sha256(salt+self._journal_path().name.encode()).digest()[:16]
+        salt=secrets.token_bytes(16)
         key=hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
         lock=self._journal_lock_path()
+        enc=self._journal_enc_path()
+        jp=self._journal_path()
         data=self._load_journal()
         if lock.exists():
-            # changing password while unlocked: read existing plaintext/enc before relocking
-            if getattr(self, "_journal_key", None) and self._journal_enc_path().exists():
-                try: data=self._journal_decrypt(self._journal_enc_path().read_bytes())
-                except: data={}
-        lock.write_text(json.dumps({"salt":salt.hex(),"check":key.hex()}), encoding="utf-8")
+            # changing password while unlocked: read existing enc/plaintext before relocking
+            if getattr(self, "_journal_key", None) and enc.exists():
+                try: data=self._journal_decrypt(enc.read_bytes())
+                except Exception as _e:
+                    _LOGGER.error("relock: could not decrypt existing journal; abort: %s", _e)
+                    return False
+            else:
+                return False
         key_b64=base64.urlsafe_b64encode(key)
         from cryptography.fernet import Fernet
         f=Fernet(key_b64)
         blob=f.encrypt(json.dumps(data, ensure_ascii=False).encode("utf-8"))
-        self._journal_enc_path().write_bytes(blob)
-        # remove plaintext
+        # atomic enc write BEFORE the lock file appears
+        import tempfile, os
+        tmp=pathlib.Path(str(enc)+".tmp")
         try:
-            jp=self._journal_path()
-            if jp.exists(): jp.unlink()
-        except: pass
+            tmp.write_bytes(blob)
+            tmp.replace(enc)
+        except Exception as _e:
+            _LOGGER.error("relock: enc write failed: %s", _e)
+            return False
+        lock.write_text(json.dumps({"salt":salt.hex(),"check":key.hex()}), encoding="utf-8")
+        # remove plaintext + temps
+        for p in (jp, jp.with_suffix(".bak"), jp.with_suffix(".tmp")):
+            try:
+                if p.exists(): p.unlink()
+            except Exception:
+                pass
         # cache key for this session without prompting again
-        old=self._journal_key
         self._journal_key=key_b64
+        self._journal_unlocked=True
         return True
 
     def _journal_remove_password(self):
-        for p in (self._journal_lock_path(), self._journal_enc_path()):
+        import json
+        enc=self._journal_enc_path()
+        jp=self._journal_path()
+        if enc.exists() and getattr(self, "_journal_key", None):
+            try:
+                data=self._journal_decrypt(enc.read_bytes())
+                text=json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+                # write plaintext directly (must bypass _save_journal: still locked here)
+                tmp=pathlib.Path(str(jp)+".tmp")
+                tmp.write_text(text, encoding='utf-8')
+                tmp.replace(jp)
+                try:
+                    pathlib.Path(str(jp)+".bak").write_text(text, encoding='utf-8')
+                except Exception:
+                    pass
+            except Exception as _e:
+                _LOGGER.error("unlock save plaintext failed: %s", _e)
+        for p in (self._journal_lock_path(), enc):
+            try:
+                if p.exists(): p.unlink()
+            except: pass
+        for p in (pathlib.Path(str(enc)+".bak"), jp.with_suffix(".tmp")):
             try:
                 if p.exists(): p.unlink()
             except: pass
@@ -2863,22 +3095,61 @@ class PetWindow:
         try:
             if self._journal_locked():
                 if getattr(self, "_journal_key", None) and self._journal_enc_path().exists():
-                    return self._journal_decrypt(self._journal_enc_path().read_bytes())
+                    try:
+                        return self._journal_decrypt(self._journal_enc_path().read_bytes())
+                    except Exception as _e:
+                        # try the .enc.bak safety copy before giving up
+                        encbak=pathlib.Path(str(self._journal_enc_path())+".bak")
+                        if encbak.exists():
+                            try: return self._journal_decrypt(encbak.read_bytes())
+                            except Exception: pass
+                        _LOGGER.error("journal enc decrypt failed: %s", _e)
+                        return {}
                 return {}
             if self._journal_path().exists():
-                return json.loads(self._journal_path().read_text(encoding='utf-8'))
+                try:
+                    return json.loads(self._journal_path().read_text(encoding='utf-8'))
+                except Exception:
+                    # corrupt plaintext: recover from backup, quarantine, and stop autosaving
+                    bak=self._journal_path().with_suffix('.bak')
+                    if bak.exists():
+                        try:
+                            recovered=json.loads(bak.read_text(encoding='utf-8'))
+                            self._journal_path().write_text(json.dumps(recovered, ensure_ascii=False, indent=2), encoding='utf-8')
+                            return recovered
+                        except Exception:
+                            pass
+                    try:
+                        self._journal_path().rename(pathlib.Path(str(self._journal_path())+".corrupt."+str(int(time.time()))))
+                    except Exception:
+                        pass
+                    self._journal_read_error=True
+                    _LOGGER.error("journal plaintext corrupt; quarantined + marked read-error")
+                    return {}
         except Exception as _e:
             _LOGGER.error("journal load failed: %s", _e)
         return {}
 
     def _save_journal(self, data):
-        import json, tempfile, os
+        import json
+        if getattr(self, "_journal_read_error", False):
+            _LOGGER.error("journal save skipped: previous load was corrupt (recovered/quarantined)")
+            return
         if self._journal_locked():
             if not getattr(self, "_journal_key", None):
                 _LOGGER.error("journal save skipped: locked but no session key")
                 return
             try:
-                self._journal_enc_path().write_bytes(self._journal_encrypt(data))
+                enc=self._journal_enc_path()
+                blob=self._journal_encrypt(data)
+                tmp=pathlib.Path(str(enc)+".tmp")
+                tmp.write_bytes(blob)
+                if enc.exists():
+                    try:
+                        pathlib.Path(str(enc)+".bak").write_bytes(enc.read_bytes())
+                    except Exception:
+                        pass
+                tmp.replace(enc)
             except Exception as _e:
                 _LOGGER.error("journal enc save failed: %s", _e)
             return
@@ -2886,14 +3157,14 @@ class PetWindow:
         try:
             # atomic + backup, never lost
             tmp=p.with_suffix('.tmp')
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8', newline='\n')
             # backup previous
             if p.exists():
-                try: (p.with_suffix('.bak')).write_text(p.read_text(encoding='utf-8'), encoding='utf-8')
+                try: (p.with_suffix('.bak')).write_text(p.read_text(encoding='utf-8'), encoding='utf-8', newline='\n')
                 except: pass
             tmp.replace(p)
         except:
-            try: p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+            try: p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8', newline='\n')
             except: pass
 
     def _entry_text(self, e):
@@ -2942,8 +3213,27 @@ class PetWindow:
     def _apply_fmt(self, txt, fmt):
         """Re-apply persisted formatting to a freshly-loaded Text widget."""
         if not fmt: return
-        def to_idx(off):
-            return txt.index(f"1.0 + {off} chars")
+        def to_idx(sought):
+            # off is a *character* offset (txt.get counts only text; embedded
+            # images occupy an index but not a char), so translate by walking
+            # the widget dump instead of using the naive "chars" index math.
+            if sought<=0:
+                return "1.0"
+            acc=0
+            try:
+                for item in txt.dump("1.0", tk.END):
+                    kind, val, idx = item
+                    if kind=="text":
+                        n=len(val)
+                        if acc==sought:
+                            return idx
+                        if acc < sought <= acc+n:
+                            return txt.index(f"{idx}+{sought-acc}c")
+                        acc+=n
+                return txt.index(tk.END)
+            except Exception:
+                try: return txt.index(f"1.0 + {sought} chars")
+                except Exception: return "1.0"
         for s,e,kind in fmt:
             if not kind: continue
             try:
@@ -3040,7 +3330,7 @@ class PetWindow:
             try:
                 im=Image.open(f)
                 im.thumbnail((460,460), Image.LANCZOS)
-                name=datetime.datetime.now().strftime("%H%M%S")+"_"+str(pathlib.Path(f).stem)[:30].replace(" ","_").replace(".","_")+".png"
+                name=datetime.datetime.now().strftime("%H%M%S_%f")+"_"+str(pathlib.Path(f).stem)[:30].replace(" ","_").replace(".","_")+".png"
                 dest=self._journal_photos_dir()/name
                 im.convert("RGB").save(dest, "PNG")
                 added.append(dest.name)
@@ -3087,10 +3377,16 @@ class PetWindow:
             status.pack()
             def go(_=None):
                 if self._journal_unlock(pw_var.get()):
+                    self._unlock_fails=0
                     gate.destroy()
                     self._open_journal(win_from=self.root)
                 else:
-                    status.configure(text="wrong password — try again ♡")
+                    self._unlock_fails+=1
+                    if self._unlock_fails>=5:
+                        status.configure(text="too many tries… closing ♡")
+                        gate.after(600, gate.destroy)
+                        return
+                    status.configure(text=f"wrong password — {5-self._unlock_fails} tries left ♡")
                     pw.delete(0, tk.END)
             pw.bind("<Return>", go)
             tk.Button(gate, text="Unlock ♡", command=go, bg="#FF8FA3", fg="white", font=("Segoe UI", 9, "bold"), bd=0, padx=18, pady=5, cursor="hand2").pack(pady=6)
@@ -3102,6 +3398,7 @@ class PetWindow:
         import datetime, json
         win=tk.Toplevel(self.root)
         self._journal_win=win
+        self._journal_applied_date=None
         win.title("Gayathree\'s Journal 📖 — Madhu's Keepsake")
         W,H=860,600
         sw=self.root.winfo_screenwidth(); sh=self.root.winfo_screenheight()
@@ -3150,7 +3447,9 @@ class PetWindow:
         try:
             from PIL import Image as _PILImage, ImageTk as _PILTK
             import pathlib as _pl
-            pth=_pl.Path(__file__).parent.parent / "assets" / "sprites" / "frame_4.png"
+            pth=self._base_dir()/ "assets" / "sprites" / "frame_4.png"
+            if not pth.exists():
+                pth=_pl.Path(__file__).parent.parent / "assets" / "sprites" / "frame_4.png"
             im=_PILImage.open(pth).convert("RGBA").resize((44,44), _PILImage.LANCZOS)
             tkp=_PILTK.PhotoImage(im)
             _decodata["paw"]=tkp; win._paw=tkp
@@ -3189,8 +3488,8 @@ class PetWindow:
         lb=tk.Listbox(lb_frame, bg="white", fg="#5a3e2b", font=("Segoe UI", 9), bd=1, relief="solid", highlightthickness=0, activestyle="none", selectbackground="#FFDAB9", selectforeground="#5a3e2b")
         lb.pack(fill="both", expand=True, ipady=4)
         # stats button
-        tk.Button(left, text="📊  Calender & Madhu's insights",
-                  command=lambda: self._show_stats(win, data, dark=dark_var.get(),
+        tk.Button(left, text="📊  Calendar & Madhu's insights",
+                  command=lambda: self._show_stats(win, data, dark=getattr(self,"_journal_dark_cur",False),
                                                    on_day=lambda ds: _goto_date(ds)),
                   bg="#EFE3CF", fg="#6B4C3B", activebackground="#E6D5B8", font=("Segoe UI", 8, "bold"),
                   bd=0, padx=6, pady=4, cursor="hand2").pack(side="bottom", padx=8, pady=(0,8))
@@ -3227,7 +3526,7 @@ class PetWindow:
         for m in ["😍","😊","😐","😢","😤","🌙"]:
             b=tk.Button(mood_bar, text=m, width=2, bd=0, bg="#FFFCF7", fg="#6B4C3B",
                         activebackground="#FFDAB9", font=("Segoe UI", 10), cursor="hand2",
-                        command=lambda m=m: (self._pick_mood(m, mood_var, mood_btns), win.after(700, lambda: _save(silent=True))))
+                        command=lambda m=m: (self._pick_mood(m, mood_var, mood_btns), _autosave()))
             b.pack(side="left", padx=1)
             mood_btns[m]=b
         # hearts rating
@@ -3295,8 +3594,13 @@ class PetWindow:
             fmt_btns[cmd]=btn
         def refresh_fmt_buttons():
             try:
-                tags=set(txt.tag_names("insert"))
-                cur_line=txt.get("insert linestart", "insert lineend")
+                if txt.tag_ranges("sel"):
+                    start=txt.index("sel.first")
+                    tags=set(txt.tag_names(start))
+                    cur_line=txt.get(start+" linestart", start+" lineend")
+                else:
+                    tags=set(txt.tag_names("insert"))
+                    cur_line=txt.get("insert linestart", "insert lineend")
             except: return
             darknow=getattr(self, "_journal_dark_cur", False)
             hot="#4e3a24" if darknow else "#FFDAB9"
@@ -3460,19 +3764,20 @@ class PetWindow:
             cur["ts"]=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             data[d]=cur
             # refresh list entry (only when its text changed; no forced jump)
-            for i in range(lb.size()):
-                if lb.get(i).split(" ")[0]==d:
-                    mark=" ●" if self._entry_populated(cur) else " ○"
-                    mood=self._entry_mood(cur)
-                    new=f"{d}{' '+mood if mood else ''}{mark}"
-                    if lb.get(i)!=new:
-                        lb.delete(i); lb.insert(i, new)
-                    sel=lb.curselection()
-                    if not sel or sel[0]!=i:
-                        lb.selection_clear(0, tk.END); lb.selection_set(i)
-                    break
-            else:
-                lb.insert(0, d + " ●")
+            if not search_var.get().strip():
+                for i in range(lb.size()):
+                    if lb.get(i).split(" ")[0]==d:
+                        mark=" ●" if self._entry_populated(cur) else " ○"
+                        mood=self._entry_mood(cur)
+                        new=f"{d}{' '+mood if mood else ''}{mark}"
+                        if lb.get(i)!=new:
+                            lb.delete(i); lb.insert(i, new)
+                        sel=lb.curselection()
+                        if not sel or sel[0]!=i:
+                            lb.selection_clear(0, tk.END); lb.selection_set(i)
+                        break
+                else:
+                    lb.insert(0, d + " ●")
             self._save_journal(data)
             if not silent:
                 self._show_bubble(f"Saved {d} — kept forever in Madhu's book ♡", 2800)
@@ -3482,9 +3787,12 @@ class PetWindow:
                 except: pass
 
         def load_date(d):
-            if d==date_var.get() and d in data: pass
-            else: _flush()
+            if d==date_var.get() and d==getattr(self, '_journal_applied_date', None):
+                # same page already applied: don't wipe unsaved editor edits
+                return
+            _flush()
             date_var.set(d)
+            self._journal_applied_date=d
             _apply_entry(d)
             try:
                 dt=datetime.datetime.fromisoformat(d)
@@ -3597,6 +3905,7 @@ class PetWindow:
         bk.pack(side="left", padx=2)
         def new_page():
             import tkinter.simpledialog as sd
+            _flush()
             # propose today if free, else the next free day ahead
             proposal=today
             if self._entry_populated(data.get(today)):
@@ -3623,6 +3932,7 @@ class PetWindow:
         tk.Button(toolrow, text="📄  new page", command=new_page, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def del_page():
             import tkinter.messagebox as mb
+            _flush()
             d=date_var.get()
             if not self._entry_populated(data.get(d)):
                 self._show_bubble("That page is already empty, love", 2500); return
@@ -3639,7 +3949,7 @@ class PetWindow:
                 date_var.set(today); load_date(today)
             self._show_bubble("Page gone — new memories ready to be written ♡", 3000)
         tk.Button(toolrow, text="🗑  delete page", command=del_page, bg="#F3E3E0", fg="#a05a5a", activebackground="#E8D3CF", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
-        tk.Button(toolrow, text="📤  export", command=lambda: self._export_journal(win, data),
+        tk.Button(toolrow, text="📤  export", command=lambda: self._export_journal(win, data, date_var.get()),
                   bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def change_time():
             import tkinter.simpledialog as sd
@@ -3671,11 +3981,12 @@ class PetWindow:
                     if self._journal_set_password(pw1):
                         self._show_bubble("Journal locked — only you can read it 🔒", 4000)
                     else:
-                        self._show_bubble("Need at least 4 characters, love", 3000)
+                        self._show_bubble("Need at least 6 characters, love", 3000)
         tk.Button(toolrow, text="🔒  lock", command=manage_lock, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         miscrow=tk.Frame(right, bg="#FFFCF7")
         miscrow.pack(side="bottom", fill="x", padx=8, pady=(0,2))
         def add_photo():
+            _flush()
             d=date_var.get()
             names=self._attach_photos(d)
             if names:
@@ -3691,6 +4002,7 @@ class PetWindow:
         tk.Button(miscrow, text="📷  photo", command=add_photo, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def photo_delete():
             import tkinter.messagebox as mb
+            _flush()
             d=date_var.get()
             cur=data.get(d)
             known=self._entry_photos(cur)
@@ -3711,6 +4023,7 @@ class PetWindow:
             except: pass
             self._journal_win=None
             win.destroy()
+        self._journal_on_close=on_close
         win.protocol("WM_DELETE_WINDOW", on_close)
         txt.focus_set()
         update_wc()
@@ -3947,7 +4260,7 @@ class PetWindow:
                                 try:
                                     opts={}
                                     if t=="heading": opts={"foreground":"#f0e2c4" if dark else "#6B4C3B"}
-                                    if t=="todo_done" and dark: opts={"foreground":"#a89a82"}
+                                    if t=="todo_done": opts={"foreground":"#a89a82" if dark else "#8B7355", "overstrike":True}
                                     if t.startswith("link_"): opts={"foreground":"#8ab4f8" if dark else "#0066CC", "underline":True}
                                     if opts: w.tag_configure(t, **opts)
                                 except: pass
@@ -4035,38 +4348,57 @@ class PetWindow:
 
     def _journal_write_pdf(self, data, path, only_today=""):
         import datetime
-        def hexstr(t):
+        def esc(t):
             r=[]
             for c in t:
+                if c in _PDF_TRANSLIT:
+                    c=_PDF_TRANSLIT[c]
                 o=ord(c)
-                r.append(hex(o)[2:].rjust(2,"0") if o<128 else "20")
+                r.append(hex(o)[2:].rjust(2,"0") if 32 <= o <= 255 else "20")
             return "".join(r)
-        body_lines=["BT /F1 14 Tf 60 750 Td <" + hexstr("Gayathree's Journal - kept by Madhu") + "> Tj ET",
-                    "BT /F1 9 Tf 60 736 Td <" + hexstr("exported " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M')) + "> Tj ET"]
+        pages=[]
+        cur=["BT /F1 14 Tf 60 750 Td <" + esc("Gayathree's Journal - kept by Madhu") + "> Tj ET",
+             "BT /F1 9 Tf 60 736 Td <" + esc("exported " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M')) + "> Tj ET"]
         y=712
+        exit_lines=0
+        def flush():
+            nonlocal cur, exit_lines
+            stream="\n".join(cur).encode("latin-1")
+            pages.append(stream)
+            cur=[]
+            exit_lines=0
         for l in self._journal_lines(data, only_today):
             if y<45:
-                body_lines.append("BT /F1 10 Tf 60 720 Td <> Tj ET")
-                y=712
-            body_lines.append("BT /F1 10 Tf 60 " + str(y) + " Td <" + hexstr(l) + "> Tj ET")
+                flush(); y=712
+            cur.append("BT /F1 10 Tf 60 " + str(y) + " Td <" + esc(l) + "> Tj ET")
             y-=14
-        stream="\n".join(body_lines).encode("latin-1")
-        catalog=b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        pages=b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-        page=(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-              b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n")
-        content=b"4 0 obj\n<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream\nendobj\n"
-        font=b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
-        parts=[catalog, pages, page, content, font]
+            exit_lines+=1
+            if exit_lines>=46:
+                flush(); y=712
+        flush()
+        n=len(pages)
+        if n==0: return path
+        font_no=3+2*n
+        objs=[]
+        objs.append("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+        kids=" ".join(f"{3+2*i} 0 R" for i in range(n))
+        objs.append(f"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {n} >>\nendobj\n")
+        for i,stream in enumerate(pages):
+            P=3+2*i
+            objs.append(f"{P} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {font_no} 0 R >> >> /Contents {P+1} 0 R >>\nendobj\n")
+            objs.append(f"{P+1} 0 obj\n<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream\nendobj\n")
+        objs.append(f"{font_no} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
         out=bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
         offs=[0]
-        for p in parts:
-            offs.append(len(out)); out+=p
+        for o in objs:
+            offs.append(len(out))
+            out+= o if isinstance(o, bytes) else o.encode("latin-1")
         xref=len(out)
-        out+=b"xref\n0 6\n0000000000 65535 f \n"
-        for o in offs[1:6]:
+        count=len(objs)+1
+        out+=f"xref\n0 {count}\n0000000000 65535 f \n".encode()
+        for o in offs[1:]:
             out+=("%010d 00000 n \n" % o).encode()
-        out+=("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref).encode()
+        out+=f"trailer\n<< /Size {count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
         path.write_bytes(bytes(out))
         return path
 
@@ -4077,7 +4409,7 @@ class PetWindow:
             hour=self.memory.get("journal_hour",21)
             minute=self.memory.get("journal_min",0)
             # changeable later via menu, default 21:00
-            if now.hour==hour and now.minute==minute and now.second<25:
+            if now.hour==hour and now.minute==minute:
                 today=now.date().isoformat()
                 slot=f"{today}_{hour}_{minute}"
                 if getattr(self, '_last_journal_slot', None) != slot:
@@ -4085,8 +4417,8 @@ class PetWindow:
                     # check if already journaled today
                     data=self._load_journal()
                     if not self._entry_text(data.get(today)).strip():
-                        self._show_bubble("9 PM — time to journal, Gayathree? 📖", 7000)
-                        print("journal reminder 9pm")
+                        self._show_bubble(f"{now.strftime('%-I').replace('0','')} {now.strftime('%p')} — time to journal, Gayathree? 📖" if hour==21 else f"{hour:02d}:{minute:02d} — time to journal, Gayathree? 📖", 7000, priority=1)
+                        print("journal reminder")
                     else:
                         self._show_bubble("Journal done today — proud of you ♡", 4000)
                     # gentle chirp if not muted
@@ -4353,6 +4685,10 @@ class PetWindow:
         except: pass
 
         self._save_pos()
+
+        if getattr(self, '_journal_win', None) is not None and getattr(self, '_journal_on_close', None):
+            try: self._journal_on_close()
+            except: pass
 
         try: mem.save(self.memory)
 

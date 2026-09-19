@@ -39,13 +39,37 @@ def load():
                 if k not in data:
                     data[k]=v
             return data
-        except: pass
+        except Exception:
+            # recover from backup instead of silently returning {} / overwriting
+            try:
+                data=json.loads(pathlib.Path(str(MEM_PATH)+".bak").read_text())
+                for k,v in DEFAULT.items():
+                    if k not in data:
+                        data[k]=v
+                save(data)
+                return data
+            except Exception:
+                _quarantine(MEM_PATH)
     return dict(DEFAULT)
+
+def _quarantine(p):
+    try:
+        p.rename(pathlib.Path(str(p)+".corrupt."+str(int(time.time()))))
+    except Exception:
+        pass
 
 def save(data):
     try:
-        MEM_PATH.write_text(json.dumps(data, indent=2))
-    except: pass
+        tmp=pathlib.Path(str(MEM_PATH)+".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        if MEM_PATH.exists():
+            try:
+                pathlib.Path(str(MEM_PATH)+".bak").write_text(MEM_PATH.read_text())
+            except Exception:
+                pass
+        tmp.replace(MEM_PATH)
+    except Exception:
+        pass
 
 def days_since(last_iso):
     if not last_iso: return 999

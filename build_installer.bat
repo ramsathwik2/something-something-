@@ -3,6 +3,7 @@ echo Building Kitty Installer (PyInstaller)...
 python -m pip install pyinstaller --quiet
 python -m PyInstaller --noconfirm --windowed --onedir --name Kitty ^
   --add-data "assets\sprites;assets\sprites" ^
+  --add-data "assets\meow.wav;assets" ^
   --icon "assets\sprites\frame_4.png" ^
   src\app.py
 echo.

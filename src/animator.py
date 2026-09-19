@@ -95,7 +95,8 @@ class SpriteAnimator:
     def set_walk_direction(self, dir):
         # dir = 1 right, -1 left
         want_flip = (dir < 0)
-        if want_flip != self.flip_walk and self.state=="walking":
+        kind = self.states.get(self.state, ("",))[0]
+        if want_flip != self.flip_walk and kind=="walk":
             self.flip_walk=want_flip
             # don't reset idx so walk stays smooth
 
@@ -114,10 +115,13 @@ class SpriteAnimator:
         elif kind=="pet":
             lst = self.pet_big if self.is_big else self.pet_frames
             if not lst:
-                lst=self.frames
+                lst=self.frames_big if self.is_big else self.frames
                 seq=[4,5,6]
         else:
             lst=self.frames
+        if not lst:
+            lst=self.frames_big if self.is_big else self.frames
+            seq=[0,1]
         pil_img = lst[seq[self.idx % len(seq)]]
         self.idx = (self.idx + 1) % len(seq)
         tk_img = ImageTk.PhotoImage(pil_img)
