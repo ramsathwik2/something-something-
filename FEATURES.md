@@ -59,7 +59,7 @@
 - `show_scrapbook()` `pet_window.py:1072` `360x320` `FFF8DC` `Our story with Madhu 📖` days since `birth`, `petCount`, `longestApartHours`, fav `avg px`, `milestones`, quote.
 
 ## 14. Build / Installer
-- `requirements.txt` Pillow psutil pystray + `build_installer.bat` `PyInstaller --windowed --onedir --name Kitty --add-data assets/sprites --add-data assets/meow.wav --icon frame_4.png src/app.py` → `dist\Kitty\Kitty.exe` `5.4MB` `installer/kitty.iss` Wizard modern, `AppName Madhu`, `wizard.bmp 164x314` + `wizard_small.bmp 55x55` from sprite. `Kitty.spec` excluded via `.gitignore`. Run via `run.bat` or `dist\Kitty\Kitty.exe`. GitHub `ramsathwik2/something-something-` `main` `7aa7b67`.
+- `requirements.txt` Pillow psutil pystray cryptography + `build_installer.bat` `PyInstaller --windowed --onedir --name Kitty --add-data assets/sprites --add-data assets/meow.wav --icon frame_4.png src/app.py` → `dist\Kitty\Kitty.exe` `installer/kitty.iss` Wizard modern, `AppName Madhu`, `wizard.bmp 164x314` + `wizard_small.bmp 55x55` from sprite. `Kitty.spec` excluded via `.gitignore`. Run via `run.bat` or `dist\Kitty\Kitty.exe`. GitHub `ramsathwik2/something-something-` `main`.
 
 ## 15. Privacy
 - Only `GetForegroundWindow` title + `GetLastInputInfo` idle, no history scrape. Food titles stay local.
