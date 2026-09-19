@@ -5,6 +5,7 @@ from pet_window import PetWindow
 SPRITE_DIR = pathlib.Path(r"D:\KITTY\assets\sprites")
 pet = PetWindow(SPRITE_DIR)
 JP = pathlib.Path(r"D:\KITTY\assets\journal.json")
+TODAY = __import__("datetime").date.today().isoformat()
 
 results=[]
 def step(name, ok):
@@ -29,7 +30,7 @@ def walk(node, kinds):
 def t1():
     try:
         w=win()
-        start=json.loads(JP.read_text(encoding="utf-8")).get("2026-09-18", {}) if JP.exists() else {}
+        start=json.loads(JP.read_text(encoding="utf-8")).get(TODAY, {}) if JP.exists() else {}
         start_mood=start.get("mood") or ""
         start_rating=int(start.get("rating") or 0)
         target_mood="😊" if start_mood!="😊" else "😤"
@@ -54,7 +55,7 @@ def t1():
 
 def t2():
     d=json.loads(JP.read_text(encoding="utf-8"))
-    e=d.get("2026-09-18", {})
+    e=d.get(TODAY, {})
     tm, tr = globals().get('EXP', ("😊",4))
     # only assert fields we actually changed
     step("mood persisted", e.get("mood")==tm)
@@ -82,7 +83,7 @@ def t3():
         lbs=walk(w,(tk.Listbox,))
         lb=lbs[0]
         items=[lb.get(i) for i in range(lb.size())]
-        step("search filters list", len(items)>=1 and items[0].startswith("2026-09-18"))
+        step("search filters list", len(items)>=1 and items[0].startswith(TODAY))
         step("search excludes nothing", all("river"==x or True for x in items))
         # clear search via the ✕ button
         [b for b in walk(w,(tk.Button,)) if b.cget("text")=="✕"][0].invoke()
@@ -106,7 +107,7 @@ def t4():
 
 def t5():
     d=json.loads(JP.read_text(encoding="utf-8"))
-    e=d.get("2026-09-18", {})
+    e=d.get(TODAY, {})
     t=e.get("text","")
     step("autosave persisted typing", "adding a draft line" in t)
     # open stats dashboard

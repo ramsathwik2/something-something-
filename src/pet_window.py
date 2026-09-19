@@ -2760,9 +2760,13 @@ class PetWindow:
         salt=hashlib.sha256(salt+self._journal_path().name.encode()).digest()[:16]
         key=hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
         lock=self._journal_lock_path()
-        lock.write_text(json.dumps({"salt":salt.hex(),"check":key.hex()}), encoding="utf-8")
-        # encrypt existing data
         data=self._load_journal()
+        if lock.exists():
+            # changing password while unlocked: read existing plaintext/enc before relocking
+            if getattr(self, "_journal_key", None) and self._journal_enc_path().exists():
+                try: data=self._journal_decrypt(self._journal_enc_path().read_bytes())
+                except: data={}
+        lock.write_text(json.dumps({"salt":salt.hex(),"check":key.hex()}), encoding="utf-8")
         key_b64=base64.urlsafe_b64encode(key)
         from cryptography.fernet import Fernet
         f=Fernet(key_b64)
@@ -2802,16 +2806,13 @@ class PetWindow:
     def _save_journal(self, data):
         import json, tempfile, os
         if self._journal_locked():
+            if not getattr(self, "_journal_key", None):
+                _LOGGER.error("journal save skipped: locked but no session key")
+                return
             try:
-                if getattr(self, "_journal_key", None):
-                    self._journal_enc_path().write_bytes(self._journal_encrypt(data))
-                else:
-                    self._journal_enc_path().write_bytes(self._journal_encrypt_dummy(data))
+                self._journal_enc_path().write_bytes(self._journal_encrypt(data))
             except Exception as _e:
                 _LOGGER.error("journal enc save failed: %s", _e)
-                try:
-                    self._journal_enc_path().write_bytes(self._journal_encrypt_dummy(data))
-                except: pass
             return
         p=self._journal_path()
         try:
@@ -2827,20 +2828,15 @@ class PetWindow:
             try: p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
             except: pass
 
-    def _journal_encrypt_dummy(self, data):
-        import json
-        from cryptography.fernet import Fernet
-        import hashlib, base64
-        salt=b"TaskbarKitten-salt"
-        key=hashlib.sha256(salt).digest()
-        f=Fernet(base64.urlsafe_b64encode(key))
-        return f.encrypt(json.dumps(data, ensure_ascii=False).encode("utf-8"))
-
     def _entry_text(self, e):
+        s=self._entry_seq(e)
+        if s is not None: return s[0] or ""
         return e if isinstance(e, str) else (e or {}).get("text", "")
 
     def _entry_fmt(self, e):
         if isinstance(e, str): return []
+        s=self._entry_seq(e)
+        if s is not None: return []
         return list((e or {}).get("fmt", []) or [])
 
     def _capture_fmt(self, txt):
@@ -2897,19 +2893,41 @@ class PetWindow:
                 t=f"link_{len(txt.tag_names())}"
                 txt.tag_configure(t, foreground="#0066CC", underline=True)
                 txt.tag_add(t, si, ei)
+                if not hasattr(txt, "_links"): txt._links={}
+                txt._links[t]=url
                 txt.tag_bind(t, "<Button-1>", lambda e, u=url: self._open_link(u))
 
+    def _entry_seq(self, e):
+        """Return the 6 legacy fields when e is a list/tuple (old format)."""
+        if isinstance(e, (list, tuple)) and len(e) >= 6:
+            return e
+        return None
+
     def _entry_mood(self, e):
+        s=self._entry_seq(e)
+        if s is not None: return s[1] or ""
         return "" if isinstance(e, str) else (e or {}).get("mood", "")
 
     def _entry_rating(self, e):
+        s=self._entry_seq(e)
+        if s is not None: return int(s[2] or 0)
         return 0 if isinstance(e, str) else int((e or {}).get("rating", 0) or 0)
 
     def _entry_tags(self, e):
+        s=self._entry_seq(e)
+        if s is not None: return list(s[3] or [])
         return [] if isinstance(e, str) else list((e or {}).get("tags", []) or [])
 
     def _entry_photos(self, e):
+        s=self._entry_seq(e)
+        if s is not None: return list(s[4] or [])
         return [] if isinstance(e, str) else list((e or {}).get("photos", []) or [])
+
+    def _entry_populated(self, e):
+        s=self._entry_seq(e)
+        if s is not None: return bool(s[0] or s[1] or s[2] or s[3] or s[4])
+        if isinstance(e, str): return bool(e.strip())
+        return bool((e or {}).get("text","").strip() or (e or {}).get("mood") or int((e or {}).get("rating",0) or 0) or (e or {}).get("tags") or (e or {}).get("photos"))
 
     def _journal_photos_dir(self):
         d=self._journal_path().parent/"journal_photos"
@@ -2968,10 +2986,6 @@ class PetWindow:
                 if i==0 and d not in data: break
             return streak
         except: return 0
-
-    def _entry_populated(self, e):
-        if isinstance(e, str): return bool(e.strip())
-        return bool((e or {}).get("text","").strip() or (e or {}).get("mood") or (e or {}).get("rating"))
 
     def show_journal(self):
         import datetime, json
@@ -3197,6 +3211,7 @@ class PetWindow:
         _photo_imgs=[]
         def photo_strip(d):
             for ch in photo_bar.winfo_children(): ch.destroy()
+            del _photo_imgs[:]
             e=data.get(d, "")
             names=self._entry_photos(e)
             phd=self._journal_photos_dir()
@@ -3226,38 +3241,18 @@ class PetWindow:
         txt.tag_configure("heading", font=("Georgia", 14, "bold"), foreground="#6B4C3B")
         txt.tag_configure("todo_done", foreground="#8B7355", overstrike=True)
 
-        # ---- load a date into the editor ----
-        auto_after=None
-        def _autosave(silent=True):
-            nonlocal auto_after
-            try:
-                if auto_after: win.after_cancel(auto_after)
-            except: pass
-            auto_after=win.after(900, lambda: _save(silent=silent))
-        def update_wc(e=None):
-            words=len(txt.get("1.0", tk.END).split())
-            wc_var.set(f"{words} words")
-            if e: _autosave()
-        txt.bind("<KeyRelease>", update_wc)
-        txt.bind("<Control-y>", lambda e: (txt.edit_redo(), update_wc(e)) and None)
-        txt.bind("<Control-z>", lambda e: (txt.edit_undo(), update_wc(e)) and None)
-
-        def _apply_entry(d):
-            e=data.get(d, "")
-            mood_var.set(self._entry_mood(e))
-            rating_var.set(self._entry_rating(e))
-            tags_selected.clear()
-            tags_selected.update(self._entry_tags(e))
-            refresh_tags(); draw_hearts()
-            txt.delete("1.0", tk.END)
-            txt.insert("1.0", self._entry_text(e))
-            self._apply_fmt(txt, self._entry_fmt(e))
-            # inline embedded photos at the end of the entry
+        def render_inline_photos():
+            """Embed the page's photos at the end of the editor (re-entrant)."""
             if not hasattr(txt, "_inline_imgs"): txt._inline_imgs=[]
-            txt._inline_imgs=[]
+            for key, val, idx in txt.dump("1.0", tk.END):
+                if key=="image":
+                    try: txt.delete(idx)
+                    except: pass
+            del txt._inline_imgs[:]
+            dd=date_var.get()
             phd=self._journal_photos_dir()
             txt.insert(tk.END, "\n")
-            for n in self._entry_photos(e):
+            for n in self._entry_photos(data.get(dd)):
                 p=phd/n
                 if not p.exists(): continue
                 try:
@@ -3270,6 +3265,60 @@ class PetWindow:
                 except: pass
             if txt._inline_imgs:
                 txt.mark_set("insert", "end-1c")
+
+        # ---- load a date into the editor ----
+        auto_after=None
+        def _autosave(silent=True):
+            nonlocal auto_after
+            try:
+                if auto_after: win.after_cancel(auto_after)
+            except: pass
+            auto_after=win.after(900, lambda: _save(silent=silent))
+        def _flush():
+            """Persist pending edits in the editor before switching dates."""
+            nonlocal auto_after
+            try:
+                if auto_after: win.after_cancel(auto_after); auto_after=None
+            except: pass
+            d=date_var.get()
+            stored=data.get(d, "")
+            cur_text=txt.get("1.0", tk.END).rstrip()
+            dirty=bool(cur_text.strip() or mood_var.get() or rating_var.get() or tags_selected or self._entry_photos(stored))
+            if dirty or self._entry_populated(stored):
+                try: _save(silent=True)
+                except: pass
+        def update_wc(e=None):
+            words=len(txt.get("1.0", tk.END).split())
+            wc_var.set(f"{words} words")
+            if e: _autosave()
+        txt.bind("<KeyRelease>", update_wc)
+        txt.bind("<Control-y>", lambda e: (txt.edit_redo(), update_wc(e)) and None)
+        txt.bind("<Control-z>", lambda e: (txt.edit_undo(), update_wc(e)) and None)
+
+        def _apply_entry(d):
+            e=data.get(d, "")
+            if isinstance(e, str): e={"text":e}
+            if self._entry_seq(e) is not None:
+                s=self._entry_seq(e)
+                e={"text":s[0] or "", "mood":s[1] or "", "rating":int(s[2] or 0),
+                   "tags":list(s[3] or []), "photos":list(s[4] or []), "ts":s[5] if len(s)>5 else None}
+            mood_var.set(self._entry_mood(e))
+            rating_var.set(self._entry_rating(e))
+            tags_selected.clear()
+            tags_selected.update(self._entry_tags(e))
+            refresh_tags(); draw_hearts()
+            # repaint mood button highlight to match current entry
+            for mb_name, mb in mood_btns.items():
+                if mb_name=="🌙": continue
+                try: mb.configure(bg="#FFD2DC" if mb_name==mood_var.get() else "#FFFCF7")
+                except: pass
+            txt.delete("1.0", tk.END)
+            txt.insert("1.0", self._entry_text(e))
+            txt.edit_reset()
+            if not hasattr(txt, "_links"): txt._links={}
+            txt._links={}
+            self._apply_fmt(txt, self._entry_fmt(e))
+            render_inline_photos()
             photo_strip(d)
             update_wc()
 
@@ -3304,6 +3353,8 @@ class PetWindow:
                 except: pass
 
         def load_date(d):
+            if d==date_var.get() and d in data: pass
+            else: _flush()
             date_var.set(d)
             _apply_entry(d)
             try:
@@ -3382,6 +3433,7 @@ class PetWindow:
         btn.pack(side="left", padx=2)
         def backdate():
             import tkinter.simpledialog as sd
+            _flush()
             d=date_var.get()
             ans=sd.askstring("Backdate entry", "Change this entry's date\n(YYYY-MM-DD):", initialvalue=d, parent=win)
             if ans:
@@ -3505,6 +3557,7 @@ class PetWindow:
                 data[d]=cur
                 self._save_journal(data)
                 photo_strip(d)
+                render_inline_photos()
                 self._show_bubble(f"{len(names)} photo{'s' if len(names)>1 else ''} tucked into the page ♡", 3500)
         tk.Button(miscrow, text="📷  photo", command=add_photo, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def photo_delete():
@@ -3521,6 +3574,7 @@ class PetWindow:
                 data[d]=cur
                 self._save_journal(data)
                 photo_strip(d)
+                render_inline_photos()
                 self._show_bubble("Photos cleared from the page ♡", 2500)
         tk.Button(miscrow, text="✕ photos", command=photo_delete, bg="#F3E3E0", fg="#a05a5a", activebackground="#E8D3CF", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def on_close():
@@ -3547,7 +3601,7 @@ class PetWindow:
         import datetime, calendar
         win=tk.Toplevel(parent)
         win.title("Madhu's Insights 📊")
-        W,H=680,520
+        W,H=640,600
         sw=self.root.winfo_screenwidth(); sh=self.root.winfo_screenheight()
         win.geometry(f"{W}x{H}+{sw//2-W//2}+{max(0,sh//2-H//2)}")
         win.configure(bg="#FDF6E3")
@@ -3563,9 +3617,8 @@ class PetWindow:
         total=len(dates)
         words=sum(len(self._entry_text(v).split()) for v in data.values())
         streak=self._journal_streak(data)
-        days_with=len(set(v.get("mood") for v in data.values() if not isinstance(v,str) and v.get("mood")))
         # entries with mood
-        moods=[v.get("mood") for v in data.values() if not isinstance(v,str) and v.get("mood")]
+        moods=[self._entry_mood(v) for v in data.values() if self._entry_mood(v)]
         from collections import Counter
         mc=Counter(moods)
         top_mood=mc.most_common(1)[0][0] if mc else "—"
@@ -3585,50 +3638,72 @@ class PetWindow:
             tk.Label(f, text=val, bg="#FFFCF7", fg="#6B4C3B", font=("Georgia", 16, "bold")).pack(anchor="center")
             tk.Label(f, text=name, bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 8)).pack(anchor="center")
             col+=1
-        # calendar grid of last 3 months worth of filled days
+        # real month calendar — navigable, day numbers visible, written days highlighted
         cal_frame=tk.Frame(win, bg="#FFFCF7")
-        cal_frame.place(x=20, y=128, width=W-40, height=180)
-        tk.Label(cal_frame, text="🗓  pages over time (last 12 weeks)  —  ● = written · emoji = mood", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8)).pack(anchor="w")
+        cal_frame.place(x=20, y=128, width=W-40, height=230)
+        today=datetime.date.today()
+        state={"ym":(today.year, today.month)}
+        mood_by_date={ds:self._entry_mood(v) for ds,v in data.items()}
+        # header: month title + prev/next
+        cal_title_bar=tk.Frame(cal_frame, bg="#FFFCF7")
+        cal_title_bar.pack(fill="x", pady=(0,2))
+        month_lbl=tk.Label(cal_title_bar, text="", bg="#FFFCF7", fg="#6B4C3B", font=("Georgia", 11, "bold"))
+        month_lbl.pack(side="left")
+        def _shift(delta):
+            y,m=state["ym"]
+            nm=m+delta
+            state["ym"]=(y-1 if nm<1 else y+1 if nm>12 else y, (nm-1)%12+1)
+            render_month()
+        for txt,delta in (("◀",-1),("▶",1)):
+            tk.Button(cal_title_bar, text=txt, bg="#F0D9B4", fg="#5a3e2b", bd=0, relief="flat",
+                      activebackground="#EAD9B0", font=("Segoe UI", 8), width=2,
+                      cursor="hand2", command=lambda de=delta: _shift(de)).pack(side="right", padx=2)
         week_labels=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
-        hdr=tk.Frame(cal_frame, bg="#FFFCF7")
-        hdr.pack(fill="x")
+        whdr=tk.Frame(cal_frame, bg="#FFFCF7")
+        whdr.pack(fill="x")
         for wl in week_labels:
-            tk.Label(hdr, text=wl, bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 7, "bold"), width=10).pack(side="left", expand=True)
+            tk.Label(whdr, text=wl, bg="#FFFCF7", fg="#C9A86A", font=("Segoe UI", 8, "bold"), width=8).pack(side="left", expand=True)
         grid=tk.Frame(cal_frame, bg="#FFFCF7")
         grid.pack(fill="both", expand=True)
-        # build 12 weeks ending today
-        today=datetime.date.today()
-        # start on Monday 12 weeks back
-        monday=datetime.date.fromordinal(today.toordinal() - today.weekday() - 7*11)
-        for r in range(12):
-            for c in range(7):
-                d=monday + datetime.timedelta(weeks=r, days=c)
-                cell=tk.Frame(grid, bg="#FFFCF7", bd=0, width=0, height=0)
-                cell.grid(row=r, column=c, sticky="nsew", padx=1, pady=1)
-                for cc in range(7): grid.columnconfigure(cc, weight=1)
-                grid.rowconfigure(r, weight=1)
-                ds=d.isoformat()
-                e=data.get(ds)
-                populated=self._entry_populated(e) if e else False
-                is_today = (d==today)
-                bg="#FFD2DC" if is_today else "#FFFCF7"
-                fg="#8B7355" if not populated else "#6B4C3B"
-                mood=""
-                if populated and not isinstance(e,str): mood=e.get("mood","") or ""
-                datelbl_text=(mood if mood else ("●" if populated else str(d.day)))
-                def _goto(ds=ds):
-                    win.destroy()
-                    if on_day: on_day(ds)
-                tk.Button(cell, bg=bg, font=("Segoe UI", 7), text=datelbl_text, fg=fg,
-                          activebackground="#FFDAB9", bd=0, relief="flat", cursor="hand2",
-                          command=_goto).pack(fill="both", expand=True)
+        for cc in range(7): grid.columnconfigure(cc, weight=1)
+        for rr in range(6): grid.rowconfigure(rr, weight=1)
+        def render_month():
+            for c in grid.winfo_children(): c.destroy()
+            y,m=state["ym"]
+            month_lbl.configure(text=f"🗓  {datetime.date(y,m,1).strftime('%B %Y')}")
+            first=datetime.date(y,m,1)
+            start=first - datetime.timedelta(days=first.weekday())
+            for r in range(6):
+                for c in range(7):
+                    d=start+datetime.timedelta(weeks=r, days=c)
+                    ds=d.isoformat()
+                    e=data.get(ds)
+                    has=self._entry_populated(e) if e else False
+                    in_month=d.year==y and d.month==m
+                    is_today=(d==today)
+                    bg="#FFD2DC" if is_today else ("#F0D9B4" if has else "#FFFCF7")
+                    fg="#C9A86A" if not in_month else ("#5a3e2b" if has or is_today else "#8B7355")
+                    cell=tk.Frame(grid, bg=bg, bd=1 if is_today else 0,
+                                  relief="solid" if is_today else "flat",
+                                  highlightthickness=1 if is_today else 0,
+                                  highlightbackground="#E8A0B5")
+                    cell.grid(row=r, column=c, sticky="nsew", padx=1, pady=1)
+                    tk.Button(cell, text=str(d.day), bg=bg, fg=fg,
+                              font=("Segoe UI", 9, "bold" if has else "normal"),
+                              activebackground="#FFDAB9", bd=0, relief="flat", cursor="hand2",
+                              command=lambda ds=ds: (win.destroy(), on_day(ds) if on_day else None)
+                              ).pack(side="top", fill="both", expand=True)
+                    if has and mood_by_date.get(ds):
+                        tk.Label(cell, text=mood_by_date[ds], bg=bg, font=("Segoe UI", 8)).pack(side="bottom")
+        render_month()
         # mood trend: mini bar by month for last 6 months
         trend_frame=tk.Frame(win, bg="#FFFCF7")
-        trend_frame.place(x=20, y=316, width=W-40, height=170)
+        trend_frame.place(x=20, y=366, width=W-40, height=190)
         tk.Label(trend_frame, text="📈  entries per week (last 12)  —  hearts = your rating", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 8)).pack(anchor="w")
         tc=tk.Canvas(trend_frame, bg="#FFFCF7", highlightthickness=0)
         tc.pack(fill="both", expand=True, pady=4)
         # count entries per week
+        monday=datetime.date.fromordinal(today.toordinal() - today.weekday() - 7*11)
         weekly=[]
         for r in range(12):
             wstart=monday + datetime.timedelta(weeks=r)
@@ -3638,7 +3713,7 @@ class PetWindow:
             avg=sum(rr)/7 if rr else 0
             weekly.append((cnt,avg))
         mx=max([x[0] for x in weekly]+[1])
-        bar_w=36; gap=14; left0=20; baseline=120
+        bar_w=30; gap=13; left0=15; baseline=120
         for i,(cnt,avg) in enumerate(weekly):
             x=left0+i*(bar_w+gap)
             h=int(cnt/mx*90) if mx else 0
@@ -3650,7 +3725,7 @@ class PetWindow:
         tag_counts=Counter()
         for v in data.values():
             if not isinstance(v,str):
-                for t in (v.get("tags") or []): tag_counts[t]+=1
+                for t in (self._entry_tags(v)): tag_counts[t]+=1
         if tag_counts:
             tk.Label(trend_frame, text="  top tags:  " + "  ·  ".join(f"{t} ×{n}" for t,n in tag_counts.most_common(4)), bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 7)).pack(side="bottom", anchor="w", pady=2)
         tk.Button(win, text="Close ♡", command=win.destroy, bg="#FF8FA3", fg="white",
@@ -3833,7 +3908,7 @@ class PetWindow:
                     self._last_journal_slot=slot
                     # check if already journaled today
                     data=self._load_journal()
-                    if not data.get(today, "").strip():
+                    if not self._entry_text(data.get(today)).strip():
                         self._show_bubble("9 PM — time to journal, Gayathree? 📖", 7000)
                         print("journal reminder 9pm")
                     else:
