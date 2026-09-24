@@ -14,9 +14,27 @@ if not _LOGGER.handlers:
     _LOGGER.addHandler(_h)
     _LOGGER.setLevel(logging.INFO)
 
+# --- safe print: a cp1252 console (or a missing/redirected stdout in a
+# --windowed exe) must never crash a Tk callback over an emoji print ---
+import builtins as _builtins
+_orig_print = _builtins.print
+def _safe_print(*a, **k):
+    try:
+        _orig_print(*a, **k)
+    except Exception:
+        try:
+            _msgs=[]
+            for _x in a:
+                try: _msgs.append(str(_x))
+                except Exception: _msgs.append(repr(_x))
+            _LOGGER.info(" ".join(_msgs))
+        except Exception:
+            pass
+_builtins.print = _safe_print
+
 from animator import SpriteAnimator
 
-from taskbar import calc_position, get_taskbar_edge, get_taskbar_rect, get_screen_size
+from taskbar import calc_position, get_taskbar_edge, get_taskbar_rect, get_screen_size, get_work_area
 
 import memory as mem
 
@@ -57,13 +75,28 @@ class PetWindow:
 
         self.root.configure(bg="#FF00FF")
 
+        # surface any unhandled Tk-callback error (the "left panel went black"
+        # bug and friends died invisibly before this because no reporter existed)
+        def _tk_crash(*exc_info):
+            _LOGGER.error("unhandled Tk callback error: %s",
+                          " / ".join(str(x) for x in exc_info[:2]))
+            try:
+                self._show_bubble("Madhu wiggled — check the log for details", 4000)
+            except Exception:
+                pass
+        self.root.report_callback_exception=_tk_crash
+
         # memory
 
         self.memory = mem.load()
 
         mem.ensure_birth(self.memory)
 
-        self.memory["lastSeen"]=datetime.datetime.now().isoformat()
+        if not self.memory.get("lastSeen"):
+            # only stamp a presence timestamp on a genuinely new profile; on a
+            # re-run we keep the PREVIOUS exit time so "longest time apart" and
+            # the "missed you" greeting can actually tally a multi-day absence.
+            self.memory["lastSeen"]=datetime.datetime.now().isoformat()
 
         mem.save(self.memory)
 
@@ -343,7 +376,10 @@ class PetWindow:
 
     def toggle_duck(self):
 
-        self.set_duck(not self.is_duck)
+        # manual duck must NOT be auto-tucked by duck_check; only the user
+        # (or the OFF toggle) may end it
+        self._duck_manual = not self.is_duck
+        self.set_duck(not self.is_duck, source="manual")
 
 
 
@@ -806,19 +842,31 @@ class PetWindow:
 
 
     def _lane_bounds(self):
-        """Return (min_x, max_x) of the walk lane on the active taskbar edge."""
+        """Return (min_x, max_x) of the walk lane.
+
+        Uses the work area (screen minus taskbar) instead of the raw
+        Shell_TrayWnd rect: on an auto-hide taskbar get_taskbar_rect() returns
+        an off-screen sliver, and on a right/left (vertical) taskbar it yields
+        min_x > max_x -- which glued the pet off-screen forever. The work area
+        follows auto-hide and vertical taskbars correctly."""
         try:
-            tr=get_taskbar_rect()
-            if tr:
-                l,_,r,_=tr
-                return int(l)+2, int(r)-self.pet_w-2
-            sw,_=get_screen_size()
-            return 2, sw-self.pet_w-2
-        except:
+            wa=get_work_area()
+            l,_,r,_=wa
+            if r - l <= self.pet_w + 4:
+                raise ValueError("degenerate work area")
+            a=int(l)+2
+            b=int(r)-self.pet_w-2
+            if b < a:
+                a,b = b,a
+            return a, b
+        except Exception:
             try:
                 sw,_=get_screen_size()
-                return 2, sw-self.pet_w-2
-            except:
+                a,b=2, sw-self.pet_w-2
+                if b < a:
+                    a,b = b,a
+                return a, max(2, b)
+            except Exception:
                 return 2, 2000000
 
     def _clamp_x(self, x):
@@ -827,6 +875,8 @@ class PetWindow:
             return None
         try:
             a,b=self._lane_bounds()
+            if b < a:
+                a,b = b,a
             return max(a, min(b, int(x)))
         except:
             return int(x)
@@ -1543,6 +1593,9 @@ class PetWindow:
 
         self.is_duck=enable
 
+        if not enable:
+            self._duck_manual=False
+
         if enable:
 
             self.walk_active=False
@@ -1615,7 +1668,7 @@ class PetWindow:
 
             self.last_activity=time.time()
 
-        elif not should and self.is_duck and not self.is_petting:
+        elif not should and self.is_duck and not self.is_petting and not getattr(self, "_duck_manual", False):
 
             # tuck the second you close the tool (was 14s)
 
@@ -3062,33 +3115,38 @@ class PetWindow:
         return True
 
     def _journal_remove_password(self):
+        """Unlock the journal. Returns True only when the plaintext made it to
+        disk AND round-tripped; never deletes the encrypted copies otherwise.
+        (The old code removed .lock/.enc/.enc.bak even when decryption failed,
+        which permanently destroyed the book. Do NOT regress to that.)"""
         import json
         enc=self._journal_enc_path()
         jp=self._journal_path()
-        if enc.exists() and getattr(self, "_journal_key", None):
-            try:
-                data=self._journal_decrypt(enc.read_bytes())
-                text=json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-                # write plaintext directly (must bypass _save_journal: still locked here)
-                tmp=pathlib.Path(str(jp)+".tmp")
-                tmp.write_text(text, encoding='utf-8')
-                tmp.replace(jp)
+        if not (enc.exists() and getattr(self, "_journal_key", None)):
+            return False
+        try:
+            data=self._journal_decrypt(enc.read_bytes())
+            text=json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+            # write plaintext directly (must bypass _save_journal: still locked here)
+            tmp=jp.with_suffix('.tmp')
+            tmp.write_text(text, encoding='utf-8')
+            tmp.replace(jp)
+            # round-trip verify BEFORE touching any encrypted copy
+            verify=json.loads(jp.read_text(encoding='utf-8'))
+            if not isinstance(verify, dict):
+                raise ValueError("plaintext round-trip produced a non-dict")
+            # now it is safe to drop the lock + encrypted copies
+            for p in (self._journal_lock_path(), enc, pathlib.Path(str(enc)+".bak")):
                 try:
-                    pathlib.Path(str(jp)+".bak").write_text(text, encoding='utf-8')
+                    if p.exists(): p.unlink()
                 except Exception:
                     pass
-            except Exception as _e:
-                _LOGGER.error("unlock save plaintext failed: %s", _e)
-        for p in (self._journal_lock_path(), enc):
-            try:
-                if p.exists(): p.unlink()
-            except: pass
-        for p in (pathlib.Path(str(enc)+".bak"), jp.with_suffix(".tmp")):
-            try:
-                if p.exists(): p.unlink()
-            except: pass
+        except Exception as _e:
+            _LOGGER.error("unlock/remove-password aborted (nothing deleted): %s", _e)
+            return False
         self._journal_key=None
         self._journal_unlocked=False
+        return True
 
     def _load_journal(self):
         import json
@@ -3115,7 +3173,10 @@ class PetWindow:
                     if bak.exists():
                         try:
                             recovered=json.loads(bak.read_text(encoding='utf-8'))
-                            self._journal_path().write_text(json.dumps(recovered, ensure_ascii=False, indent=2), encoding='utf-8')
+                            # repair main atomically (was a plain write before)
+                            jptmp=self._journal_path().with_suffix('.tmp')
+                            jptmp.write_text(json.dumps(recovered, ensure_ascii=False, indent=2), encoding='utf-8')
+                            jptmp.replace(self._journal_path())
                             return recovered
                         except Exception:
                             pass
@@ -3158,14 +3219,24 @@ class PetWindow:
             # atomic + backup, never lost
             tmp=p.with_suffix('.tmp')
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8', newline='\n')
-            # backup previous
+            # rotate .bak ONLY when the current main parses as valid JSON; a
+            # corrupt main must never clobber the one good backup
             if p.exists():
-                try: (p.with_suffix('.bak')).write_text(p.read_text(encoding='utf-8'), encoding='utf-8', newline='\n')
-                except: pass
+                try:
+                    prev=p.read_text(encoding='utf-8')
+                    json.loads(prev)
+                    (p.with_suffix('.bak')).write_text(prev, encoding='utf-8', newline='\n')
+                except Exception:
+                    pass
             tmp.replace(p)
-        except:
-            try: p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8', newline='\n')
-            except: pass
+        except Exception as _e:
+            # no non-atomic fallback write here: that could corrupt the file it
+            # was meant to preserve
+            _LOGGER.error("journal save failed (journal untouched): %s", _e)
+            try:
+                if tmp.exists(): tmp.unlink()
+            except Exception:
+                pass
 
     def _entry_text(self, e):
         s=self._entry_seq(e)
@@ -3340,15 +3411,20 @@ class PetWindow:
     def _journal_streak(self, data):
         import datetime
         try:
-            dates=sorted([d for d,v in data.items() if self._entry_text(v).strip()])
-            if not dates: return 0
+            written=sorted((d for d,v in data.items() if self._entry_text(v).strip()), reverse=True)
+            if not written: return 0
+            today=datetime.date.today().isoformat()
+            # if today is unwritten but yesterday has a page, the streak is
+            # still alive (pending); old code read a hard 0 until the save
+            start=today if today in written else (datetime.date.today()-datetime.timedelta(days=1)).isoformat()
             streak=0
-            cur=datetime.date.today()
-            for i in range(60):
-                d=(cur - datetime.timedelta(days=i)).isoformat()
-                if d in data and self._entry_text(data[d]).strip(): streak+=1
-                else: break
-                if i==0 and d not in data: break
+            cur=datetime.date.fromisoformat(start)
+            for _ in range(max(1, len(written)+2)):
+                if cur.isoformat() in written:
+                    streak+=1
+                    cur-=datetime.timedelta(days=1)
+                else:
+                    break
             return streak
         except: return 0
 
@@ -3400,8 +3476,11 @@ class PetWindow:
         self._journal_win=win
         self._journal_applied_date=None
         win.title("Gayathree\'s Journal 📖 — Madhu's Keepsake")
-        W,H=860,600
+        # clamp to the logical screen: a hardcoded 860x600 could clip the Save/
+        # tools rows on 125%+ scaled or small panels (bottom of the window DOA)
         sw=self.root.winfo_screenwidth(); sh=self.root.winfo_screenheight()
+        W=min(860, max(640, sw-60))
+        H=min(600, max(360, sh-80))
         win.geometry(f"{W}x{H}+{sw//2-W//2}+{max(0,sh//2-H//2)}")
         win.configure(bg="#FDF6E3")
         win.attributes("-topmost", True)
@@ -3411,7 +3490,9 @@ class PetWindow:
         # --- responsive book re-layout ---
         _redraw_job={"id":None}
         _decodata={"paw":None}
+        _frames_ok={"ok":False}
         def _redecorate(cw, ch):
+            cw=max(cw, 280); ch=max(ch, 200)   # degenerate sizes -> rounded-rect errors
             canvas.delete("deco")
             dark = getattr(self, "_journal_dark_cur", False)
             if dark:
@@ -3430,18 +3511,31 @@ class PetWindow:
             if paw is not None: canvas.create_image(cw-48, 36, image=paw, tags="deco")
             return inner
         def _relayout(cw, ch):
+            if not _frames_ok["ok"]:
+                return
+            cw=max(cw, 320); ch=max(ch, 220)
             page_w=max(248, cw//2 - 38)   # both pages grow equally (book symmetry)
-            left.place(x=22, y=72, width=page_w, height=ch-108)
-            right.place(x=cw//2+16, y=72, width=cw//2-38, height=ch-108)
+            ph=max(40, ch-108)            # never <=0: a negative height collapses
+                                          # the frame to a 1px black/dark sliver
+            left.place(x=22, y=72, width=page_w, height=ph)
+            right.place(x=cw//2+16, y=72, width=cw//2-38, height=ph)
             left.configure(width=page_w)
             right.configure(width=cw//2-38)
+        def _apply_redraw(cw, ch):
+            # guard: an exception here used to die invisibly inside the after()
+            # lambda, leaving the left panel at a stale/black geometry forever
+            try:
+                _redecorate(cw, ch)
+                _relayout(cw, ch)
+            except Exception as _e:
+                _LOGGER.error("journal re-layout failed: %s", _e)
         def _schedule_redraw(e=None):
             if _redraw_job["id"]:
                 try: win.after_cancel(_redraw_job["id"])
                 except: pass
             cw=win.winfo_width(); ch=win.winfo_height()
             if cw<=1 or ch<=1: cw,ch=W,H
-            _redraw_job["id"]=win.after(40, lambda: (_redecorate(cw,ch), _relayout(cw,ch)))
+            _redraw_job["id"]=win.after(80, lambda: _apply_redraw(cw,ch))
         win.bind("<Configure>", _schedule_redraw)
         # --- initial decorations ---
         try:
@@ -3466,6 +3560,21 @@ class PetWindow:
         tk.Label(left, text="📅  Days with Madhu", bg="#FFFCF7", fg="#6B4C3B", font=("Segoe UI", 9, "bold")).pack(pady=(6,2))
         # streak
         data=self._load_journal()
+        if getattr(self, "_journal_read_error", False):
+            # a previous load found the file corrupt and quarantined it: tell the
+            # user exactly once, then clear the flag so this fresh book can save
+            # again (saves were previously silently voided for the whole session)
+            self._journal_read_error=False
+            self._journal_read_error_shown=True
+            try:
+                import tkinter.messagebox as _mb
+                _mb.showwarning(
+                    "Madhu found a problem in your book",
+                    "A previous journal file was damaged, so Madhu parked it as a "
+                    "'.corrupt' file and opened a fresh book. Your old words are "
+                    "still on disk.\n\nNothing has been deleted.", parent=win)
+            except Exception:
+                pass
         filled=len([v for v in data.values() if self._entry_populated(v)])
         streak=self._journal_streak(data)
         tk.Label(left, text=f"{filled} pages  •  {streak} day streak 🔥", bg="#FFFCF7", fg="#8B7355", font=("Segoe UI", 7)).pack()
@@ -3496,6 +3605,7 @@ class PetWindow:
         # right page — writing paper with lines
         right=tk.Frame(win, bg="#FFFCF7", bd=1, relief="solid")
         right.place(x=W//2+16, y=72, width=W//2-38, height=H-108)
+        _frames_ok["ok"]=True
         today=datetime.date.today().isoformat()
         date_var=tk.StringVar(value=today)
         pretty_today=datetime.datetime.now().strftime("%A, %B %d  —  %Y")
@@ -3671,11 +3781,8 @@ class PetWindow:
             dd=date_var.get()
             phd=self._journal_photos_dir()
             names=[n for n in self._entry_photos(data.get(dd)) if (phd/n).exists()]
-            # collapse blank-line rubble left by older renders
-            body=txt.get("1.0", tk.END)
-            if "\n\n\n" in body:
-                txt.delete("1.0", tk.END)
-                txt.insert("1.0", body.replace("\n\n\n", "\n\n"))
+            # (removed here: aggressive "\n\n\n"->"\n\n" collapsing silently ate
+            #  the user's deliberate blank lines on every date switch)
             if not names:
                 return
             # start the photo block on its own line
@@ -3968,10 +4075,15 @@ class PetWindow:
             import tkinter.simpledialog as sd, tkinter.messagebox as mb
             if self._journal_locked():
                 if mb.askyesno("Remove password?", "Turn off the lock? Existing entries stay safe.", parent=win):
-                    self._journal_remove_password()
-                    try: self._save_journal(data)
-                    except: pass
-                    self._show_bubble("Lock removed — Madhu's book is open", 3000)
+                    if self._journal_remove_password():
+                        try: self._save_journal(data)
+                        except: pass
+                        self._show_bubble("Lock removed — Madhu's book is open", 3000)
+                    else:
+                        mb.showerror("Couldn't remove the lock",
+                                     "Madhu couldn't read the locked book just now, so she kept it "
+                                     "locked rather than risk losing anything. Try again in a moment.\n"
+                                     "No data was deleted.", parent=win)
             else:
                 pw1=sd.askstring("Protect journal 🔒", "Set a password\n(so Madhu's book stays private):", show="●", parent=win)
                 if pw1:
@@ -4019,14 +4131,37 @@ class PetWindow:
                 self._show_bubble("Photos cleared from the page ♡", 2500)
         tk.Button(miscrow, text="✕ photos", command=photo_delete, bg="#F3E3E0", fg="#a05a5a", activebackground="#E8D3CF", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def on_close():
-            try: _save(silent=True)
-            except: pass
+            try:
+                if auto_after:
+                    try: win.after_cancel(auto_after)
+                    except: pass
+                    auto_after=None
+                _save(silent=True)
+            except Exception as _e:
+                _LOGGER.error("journal close save failed: %s", _e)
+                try:
+                    import tkinter.messagebox as _mb
+                    _mb.showerror("Madhu couldn't save your page",
+                                  "Your last few words may not have been kept. "
+                                  "Please copy the page text before closing, love.",
+                                  parent=win)
+                except Exception:
+                    pass
             self._journal_win=None
             win.destroy()
         self._journal_on_close=on_close
         win.protocol("WM_DELETE_WINDOW", on_close)
         txt.focus_set()
         update_wc()
+        # restore the theme used last time this journal was open in the session:
+        # without this the book re-draws dark ("black panel") onto light widgets,
+        # or light onto a dark window
+        if getattr(self, "_journal_dark_cur", False):
+            dark_var.set(True)
+            dark_tbtn.config(text="☀️")
+            try: self._apply_journal_theme(win, True)
+            except Exception as _e: _LOGGER.error("journal theme restore: %s", _e)
+            _schedule_redraw()
 
     def _pick_mood(self, m, mood_var, mood_btns):
         darknow = getattr(self, "_journal_dark_cur", False)
@@ -4284,7 +4419,7 @@ class PetWindow:
         import datetime, os
         def ask(ext):
             import tkinter.filedialog as fd
-            return fd.asksaveasfilename(parent=parent, defaultextension=ext,
+            return fd.asksaveasfilename(parent=parent, defaultextension="." + ext,
                                         initialdir=str(pathlib.Path.home() / "Desktop"),
                                         initialfile=f"Madhu_Journal_{datetime.date.today()}.{ext}",
                                         filetypes=[(ext.upper() + " file", "*." + ext)])
@@ -4351,10 +4486,12 @@ class PetWindow:
         def esc(t):
             r=[]
             for c in t:
-                if c in _PDF_TRANSLIT:
-                    c=_PDF_TRANSLIT[c]
-                o=ord(c)
-                r.append(hex(o)[2:].rjust(2,"0") if 32 <= o <= 255 else "20")
+                # replacement strings can be multi-char ("..." "[x]" "oe" "ss");
+                # escape each replacement char individually (ord() of a multi-
+                # char string used to raise TypeError and kill the whole export)
+                for cc in _PDF_TRANSLIT.get(c, c):
+                    o=ord(cc)
+                    r.append(hex(o)[2:].rjust(2,"0") if 32 <= o <= 255 else "20")
             return "".join(r)
         pages=[]
         cur=["BT /F1 14 Tf 60 750 Td <" + esc("Gayathree's Journal - kept by Madhu") + "> Tj ET",
@@ -4413,16 +4550,26 @@ class PetWindow:
                 today=now.date().isoformat()
                 slot=f"{today}_{hour}_{minute}"
                 if getattr(self, '_last_journal_slot', None) != slot:
-                    self._last_journal_slot=slot
-                    # check if already journaled today
+                    # Windows strftime has no %-I; use manual 12-hour math
+                    twelve=(now.hour % 12) or 12
                     data=self._load_journal()
-                    if not self._entry_text(data.get(today)).strip():
-                        self._show_bubble(f"{now.strftime('%-I').replace('0','')} {now.strftime('%p')} — time to journal, Gayathree? 📖" if hour==21 else f"{hour:02d}:{minute:02d} — time to journal, Gayathree? 📖", 7000, priority=1)
-                        print("journal reminder")
-                    else:
-                        self._show_bubble("Journal done today — proud of you ♡", 4000)
-                    # gentle chirp if not muted
-                    self._play_meow("chirp")
+                    if getattr(self, "_journal_read_error", False):
+                        # reminder-time load: never void saves silently
+                        self._journal_read_error=False
+                    try:
+                        if not self._entry_text(data.get(today)).strip():
+                            msg=(f"{twelve} {now.strftime('%p')} — time to journal, Gayathree? 📖"
+                                 if hour==21 else
+                                 f"{hour:02d}:{minute:02d} — time to journal, Gayathree? 📖")
+                            self._show_bubble(msg, 7000, priority=1)
+                            print("journal reminder")
+                        else:
+                            self._show_bubble("Journal done today — proud of you ♡", 4000)
+                        # gentle chirp if not muted
+                        self._play_meow("chirp")
+                    finally:
+                        # latch only AFTER the work, so a failure can retry today
+                        self._last_journal_slot=slot
         except: pass
         self.root.after(25000, self.check_journal_reminder)
 
@@ -4648,19 +4795,28 @@ class PetWindow:
 
 
 
-    def _save_pos(self):
+    def _save_pos(self, force=False):
 
         try:
 
             if self.walk_x is not None:
 
-                self._pos_file.write_text(str(int(self.walk_x)))
+                cur_x=int(self.walk_x)
+
+                # dirty-flag: poll_position runs every 5s; only write when the
+                # pet actually moved (was ~20 GB/yr of pointless disk churn)
+                if not force and cur_x == getattr(self, "_last_saved_x", None):
+                    return
+
+                self._last_saved_x=cur_x
+
+                self._pos_file.write_text(str(cur_x))
 
                 # also persist favorite + memory pos
 
                 try:
 
-                    self.memory["pos_x"]=int(self.walk_x)
+                    self.memory["pos_x"]=cur_x
 
                     mem.save(self.memory)
 
@@ -4684,14 +4840,17 @@ class PetWindow:
 
         except: pass
 
-        self._save_pos()
+        self._save_pos(force=True)
 
         if getattr(self, '_journal_win', None) is not None and getattr(self, '_journal_on_close', None):
+            # do NOT swallow: a silent failure here loses the page being typed
             try: self._journal_on_close()
-            except: pass
+            except Exception as _e: _LOGGER.error("final journal save failed: %s", _e)
 
-        try: mem.save(self.memory)
-
+        try:
+            # persist when she left, so the next launch can greet/measure absence
+            self.memory["lastSeen"]=datetime.datetime.now().isoformat()
+            mem.save(self.memory)
         except: pass
 
         self.root.destroy()

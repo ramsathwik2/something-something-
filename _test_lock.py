@@ -1,7 +1,20 @@
-import sys, pathlib, json
-sys.path.insert(0, r"D:\KITTY\src")
+import sys, pathlib, shutil, tempfile, os, json
+
+# Self-sandboxing runner: copies src+assets to a temp dir and runs purely
+# there, so no real journal/memory/lock data is ever touched on this machine.
+_HERE = pathlib.Path(__file__).resolve().parent
+ROOT = _HERE
+if os.environ.get("TASKBAR_KITTEN_TEST_SANDBOX", "1") not in ("0", "false", "no"):
+    import tempfile as _tf
+    _tmp = pathlib.Path(_tf.mkdtemp(prefix="kitty_test_lock_"))
+    shutil.copytree(ROOT / "src", _tmp / "src")
+    shutil.copytree(ROOT / "assets", _tmp / "assets")
+    ROOT = _tmp
+    print("[sandbox]", ROOT)
+
+sys.path.insert(0, str(ROOT / "src"))
 from pet_window import PetWindow
-pet = PetWindow(pathlib.Path(r"D:\KITTY\assets\sprites"))
+pet = PetWindow(pathlib.Path(ROOT / "assets" / "sprites"))
 
 # clean any existing lock
 pet._journal_remove_password()
@@ -43,3 +56,5 @@ print("encrypted save round-trip:", rd.get("2026-09-18", {}).get("text", "") == 
 pet._journal_remove_password()
 pet._save_journal(rd)
 print("cleanup done, plaintext:", pet._journal_path().exists())
+try: pet.root.destroy()
+except Exception: pass

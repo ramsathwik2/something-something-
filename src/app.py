@@ -28,11 +28,16 @@ _SINGLE_INSTANCE_MUTEX = "Local\\TaskbarKitten_SingleInstance_Mutex"
 
 def acquire_single_instance():
     """Return handle if we are the only instance, else None."""
-    handle = ctypes.windll.kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX)
+    kernel32 = ctypes.windll.kernel32
+    # c_int (the default restype) truncates a 64-bit HANDLE on x64
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+    handle = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX)
     if not handle:
         return None
     # ERROR_ALREADY_EXISTS = 183
-    if ctypes.windll.kernel32.GetLastError() == 183:
+    if kernel32.GetLastError() == 183:
+        kernel32.CloseHandle(handle)
         return None
     return handle
 
@@ -73,8 +78,8 @@ def main():
             def on_mute(icon,item): pet.tray_state = state; pet.post_ui(pet.toggle_mute)
             def on_story(icon,item): pet.post_ui(pet.show_scrapbook)
             def on_luck(icon,item): pet.post_ui(pet.trigger_luck)
-            def name_text(item): return f"Pet {state['name']} <3"
-            def mute_text(item): return ("🔇 Unmute" if state["muted"] else "🔊 Mute")
+            def name_text(item): return f"Pet {pet.kitten_name or 'Kitten'} <3"
+            def mute_text(item): return ("🔇 Unmute" if pet.memory.get("is_muted") else "🔊 Mute")
             menu = pystray.Menu(
                 pystray.MenuItem("Placement: Above", on_above),
                 pystray.MenuItem("Placement: Overlay (ON taskbar)", on_overlay),
@@ -98,7 +103,11 @@ def main():
         pet.post_ui(pet.show_journal)
     pet.run()
     mon.stop()
-    ctypes.windll.kernel32.ReleaseMutex(mutex)
+    # we never took ownership, so ReleaseMutex was a no-op; close the handle
+    # explicitly instead (the kernel would clean it up at exit anyway)
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle(mutex)
     print("Exited")
 
 if __name__ == "__main__":

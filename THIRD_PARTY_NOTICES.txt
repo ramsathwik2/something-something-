@@ -1,0 +1,59 @@
+THIRD-PARTY NOTICES
+===================
+
+"Madhu — Taskbar Kitten" gifts and bundles several open-source
+components. Their copyrights remain with their respective owners.
+License identifiers use SPDX naming.
+
+Python (interpreter + stdlib, incl. tkinter)
+  Copyright (c) 2001-2026 Python Software Foundation
+  https://www.python.org/
+  License : Python Software Foundation License 2.0 (PSF-2.0)
+            https://docs.python.org/3/license.html
+
+Tcl / Tk (widget toolkit used by tkinter)
+  Copyright (c) The Tcl/Tk Community
+  https://www.tcl.tk/
+  License : TCL (BSD-style) / Tk License
+            https://www.tcl.tk/software/tcltk/license.html
+
+Pillow (image handling for sprites and photos)
+  Copyright (c) 1995-2026 Jeffrey A. Clark and contributors
+  https://python-pillow.org/
+  Homepage license file: https://github.com/python-pillow/Pillow/blob/main/LICENSE
+  License : HPND (PIL-compatible)
+
+pystray (system-tray icon integration)
+  Copyright (c) 2017 Moritz Raabe
+  https://github.com/moses-palmer/pystray
+  License : GNU Lesser General Public License v3.0 or later (LGPL-3.0-or-later)
+  Full text: https://www.gnu.org/licenses/lgpl-3.0.txt
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+cryptography (Fernet encryption used for the private journal)
+  Copyright (c) The Python Cryptographic Authority and contributors
+  https://github.com/pyca/cryptography
+  License : Apache License 2.0 / BSD-3-Clause (dual)
+            https://github.com/pyca/cryptography/blob/main/LICENSE
+
+PyInstaller (used only to build the distributable)
+  Copyright (c) 2017-2026 Hartmut Goebel, Jasper van den Bosch,
+  Bryan A. Jones and contributors
+  https://pyinstaller.org/
+  License : GPL-2.0-or-later WITH Bootloader-exception
+            https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt
+  The bootloader exception permits bundling this application without
+  licensing the application under the GPL.
+
+rpyc / argon2-cffi / winsdk (optional PyInstaller-internal extras)
+  When present as transitive build-only dependencies, they are not
+  shipped with the application runtime.
+
+Distributing this file alongside the application satisfies the
+attribution requirements of the licenses above. The complete text of
+the LGPL-3.0, Apache-2.0, HPND and PSF-2.0 licenses is available at
+the URLs shown. For the LGPL component you may, under the terms of
+LGPL-3.0, obtain the corresponding source code by contacting the
+distributor or visiting the upstream repository linked above.

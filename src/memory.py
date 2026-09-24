@@ -33,7 +33,7 @@ DEFAULT = {
 def load():
     if MEM_PATH.exists():
         try:
-            data=json.loads(MEM_PATH.read_text())
+            data=json.loads(MEM_PATH.read_text(encoding='utf-8'))
             # merge defaults
             for k,v in DEFAULT.items():
                 if k not in data:
@@ -42,10 +42,18 @@ def load():
         except Exception:
             # recover from backup instead of silently returning {} / overwriting
             try:
-                data=json.loads(pathlib.Path(str(MEM_PATH)+".bak").read_text())
+                bak_path=pathlib.Path(str(MEM_PATH)+".bak")
+                data=json.loads(bak_path.read_text(encoding='utf-8'))
                 for k,v in DEFAULT.items():
                     if k not in data:
                         data[k]=v
+                # snapshot the GOOD backup before any write, so a crash between
+                # now and the repaired save can never leave us with no copy.
+                try:
+                    pathlib.Path(str(bak_path)+".recovered."+str(int(time.time()))).write_text(
+                        json.dumps(data, indent=2), encoding='utf-8')
+                except Exception:
+                    pass
                 save(data)
                 return data
             except Exception:
@@ -61,10 +69,15 @@ def _quarantine(p):
 def save(data):
     try:
         tmp=pathlib.Path(str(MEM_PATH)+".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
+        tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
         if MEM_PATH.exists():
             try:
-                pathlib.Path(str(MEM_PATH)+".bak").write_text(MEM_PATH.read_text())
+                # only rotate .bak when the current main is VALID json; a corrupt
+                # main must never overwrite the one good backup (that was the
+                # recovery-destroys-only-copy bug).
+                prev=MEM_PATH.read_text(encoding='utf-8')
+                json.loads(prev)
+                pathlib.Path(str(MEM_PATH)+".bak").write_text(prev, encoding='utf-8')
             except Exception:
                 pass
         tmp.replace(MEM_PATH)

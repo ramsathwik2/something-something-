@@ -6,7 +6,7 @@
 ; ───────────────────────────────────────────────
 #define MyAppName "Madhu"
 #define MyAppNameLong "Madhu — Taskbar Kitten ♥"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.1"
 #define MyAppPublisher "KITTY — with ♥"
 #define MyAppPublisherURL "https://github.com"
 #define MyAppExeName "Kitty.exe"
@@ -26,7 +26,7 @@ AppCopyright={#MyAppCopyright}
 VersionInfoDescription=Madhu — Taskbar Kitten ♥ — Gift Edition
 VersionInfoCopyright={#MyAppCopyright}
 VersionInfoProductName={#MyAppNameLong}
-VersionInfoVersion={#MyAppVersion}
+VersionInfoVersion=1.1.0.0
 AppUpdatesURL={#MyAppPublisherURL}
 DefaultDirName={autopf}\Madhu
 DefaultGroupName={#MyAppNameLong}
@@ -34,6 +34,7 @@ AllowNoIcons=yes
 OutputDir=..
 OutputBaseFilename=KittySetup
 SetupIconFile=kitty.ico
+AppMutex=Local\TaskbarKitten_SingleInstance_Mutex
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppNameLong}
 Compression=lzma
@@ -80,6 +81,7 @@ Name: "autostart"; Description: "Launch at startup (kitten greets you at boot) �
 
 [Files]
 Source: "..\dist\Kitty\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppNameLong}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"

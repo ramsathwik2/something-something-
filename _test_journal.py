@@ -1,10 +1,22 @@
-import sys, pathlib, tkinter as tk, json, time
-sys.path.insert(0, str(pathlib.Path(r"D:\KITTY\src")))
+import sys, pathlib, shutil, tempfile, os, tkinter as tk, json, time
+
+# Self-sandboxing runner: copies src+assets into a temp dir and runs purely
+# there, so no real journal/memory data on this machine is ever modified.
+_HERE = pathlib.Path(__file__).resolve().parent
+ROOT = _HERE
+if os.environ.get("TASKBAR_KITTEN_TEST_SANDBOX", "1") not in ("0", "false", "no"):
+    _tmp = pathlib.Path(tempfile.mkdtemp(prefix="kitty_test_journal_"))
+    shutil.copytree(ROOT / "src", _tmp / "src")
+    shutil.copytree(ROOT / "assets", _tmp / "assets")
+    ROOT = _tmp
+    print("[sandbox]", ROOT)
+
+sys.path.insert(0, str(ROOT / "src"))
 from pet_window import PetWindow
 
-SPRITE_DIR = pathlib.Path(r"D:\KITTY\assets\sprites")
+SPRITE_DIR = ROOT / "assets" / "sprites"
 pet = PetWindow(SPRITE_DIR)
-JP = pathlib.Path(r"D:\KITTY\assets\journal.json")
+JP = ROOT / "assets" / "journal.json"
 TODAY = __import__("datetime").date.today().isoformat()
 
 results=[]
