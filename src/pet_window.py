@@ -3517,10 +3517,19 @@ class PetWindow:
             page_w=max(248, cw//2 - 38)   # both pages grow equally (book symmetry)
             ph=max(40, ch-108)            # never <=0: a negative height collapses
                                           # the frame to a 1px black/dark sliver
-            left.place(x=22, y=72, width=page_w, height=ph)
-            right.place(x=cw//2+16, y=72, width=cw//2-38, height=ph)
-            left.configure(width=page_w)
-            right.configure(width=cw//2-38)
+            # place-managed widgets do NOT repaint when the parent resizes: they
+            # keep a stale (pure-black) backing store. place_forget + place every
+            # relayout so Tk invalidates and redraws the whole subtree.
+            try:
+                left.place_forget(); left.place(x=22, y=72, width=page_w, height=ph)
+                right.place_forget(); right.place(x=cw//2+16, y=72, width=cw//2-38, height=ph)
+                # header labels are placed once at open but never re-centered: move
+                # them too (re-place forces a repaint and keeps them centered)
+                _win_labels[0].place_forget(); _win_labels[0].place(x=cw//2, y=22, anchor="n")
+                _win_labels[1].place_forget(); _win_labels[1].place(x=cw//2, y=44, anchor="n")
+                win.update_idletasks()
+            except Exception:
+                pass
         def _apply_redraw(cw, ch):
             # guard: an exception here used to die invisibly inside the after()
             # lambda, leaving the left panel at a stale/black geometry forever
@@ -4131,6 +4140,7 @@ class PetWindow:
                 self._show_bubble("Photos cleared from the page ♡", 2500)
         tk.Button(miscrow, text="✕ photos", command=photo_delete, bg="#F3E3E0", fg="#a05a5a", activebackground="#E8D3CF", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         def on_close():
+            nonlocal auto_after
             try:
                 if auto_after:
                     try: win.after_cancel(auto_after)
