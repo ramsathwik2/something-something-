@@ -6,6 +6,7 @@
 
 ![Madhu on the taskbar](docs/img/hero.png)
 
+[![Version](https://img.shields.io/badge/Version-1.1.2-ff8fa3.svg)](#-download)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](#)
 [![GUI: Tkinter](https://img.shields.io/badge/GUI-Tkinter-green.svg)](#)
 [![Images: Pillow](https://img.shields.io/badge/Images-Pillow-orange.svg)](#)
@@ -19,8 +20,10 @@ milestones — and keeps a whole private journal for you, locked and safe.
 
 ---
 
-**[⬇ Download KittySetup.exe](https://raw.githubusercontent.com/ramsathwik2/something-something-/main/KittySetup.exe)**
-· No Python needed — everything is bundled.
+## ⬇ Download
+
+**[Get KittySetup v1.1.2](https://github.com/ramsathwik2/something-something-/releases/latest/download/KittySetup.exe)**
+· No Python needed — everything is bundled · or browse [all releases](https://github.com/ramsathwik2/something-something-/releases).
 
 **Read the full documentation:**
 📄 [`Madhu_Documentation.pdf`](docs/Madhu_Documentation.pdf) ·
@@ -34,13 +37,16 @@ milestones — and keeps a whole private journal for you, locked and safe.
 
 ## 🚀 Quick start (for her — no Python needed)
 
-1. **Download** [`KittySetup.exe`](https://raw.githubusercontent.com/ramsathwik2/something-something-/main/KittySetup.exe).
+1. **Download** [`KittySetup.exe`](https://github.com/ramsathwik2/something-something-/releases/latest/download/KittySetup.exe).
+   If the browser warns about the download: **⋯ → Keep** (Edge) or **∨ → Keep anyway** (Chrome).
 2. **Run the installer** — it asks for a simple install folder and puts Madhu there.
-3. If Windows SmartScreen complains: **More info → Run anyway** (the app is unsigned; it's fine).
-4. **First launch:** a beautiful card asks *"what will you call her?"* — type a name
+   No admin rights needed. If Windows SmartScreen pops up: **More info → Run anyway**
+   (the app is free and unsigned, so Windows asks once — it's safe).
+3. **First launch:** a beautiful card asks *"what will you call her?"* — type a name
    (the default is **Madhu**) and press *That's my name* 🐾.
-5. She appears on the taskbar! Right-click her for the menu, or use the 🐱 tray icon
-   near the clock. That's it. 🎉
+4. She appears on the taskbar! Right-click her for the menu, or use the 🐱 tray icon
+   near the clock. Open **Gayathree's Journal 📖** from the menu and press **🌙** for
+   dark mode. That's it. 🎉
 
 Her memory, journal and photos live in `%APPDATA%\TaskbarKitten\` — everything stays
 on this machine.
