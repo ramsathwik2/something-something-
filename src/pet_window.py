@@ -3538,6 +3538,23 @@ class PetWindow:
                 _relayout(cw, ch)
             except Exception as _e:
                 _LOGGER.error("journal re-layout failed: %s", _e)
+            # Packed widgets (stats/Save buttons, search row) sometimes never get
+            # repaint damage after a place-driven relayout and stay buried under
+            # siblings (or black). A synthetic Expose sweep re-arms paint for the
+            # whole subtree once layout has settled.
+            try:
+                win.update_idletasks()
+                _stack=[win]
+                while _stack:
+                    _node=_stack.pop()
+                    try: _kids=_node.winfo_children()
+                    except Exception: _kids=()
+                    for _k in _kids:
+                        try: _k.event_generate("<Expose>", when="tail")
+                        except Exception: pass
+                        _stack.append(_k)
+            except Exception:
+                pass
         def _schedule_redraw(e=None):
             if _redraw_job["id"]:
                 try: win.after_cancel(_redraw_job["id"])
@@ -3605,12 +3622,6 @@ class PetWindow:
         # subtle paper lines behind list
         lb=tk.Listbox(lb_frame, bg="white", fg="#5a3e2b", font=("Segoe UI", 9), bd=1, relief="solid", highlightthickness=0, activestyle="none", selectbackground="#FFDAB9", selectforeground="#5a3e2b")
         lb.pack(fill="both", expand=True, ipady=4)
-        # stats button
-        tk.Button(left, text="📊  Calendar & Madhu's insights",
-                  command=lambda: self._show_stats(win, data, dark=getattr(self,"_journal_dark_cur",False),
-                                                   on_day=lambda ds: _goto_date(ds)),
-                  bg="#EFE3CF", fg="#6B4C3B", activebackground="#E6D5B8", font=("Segoe UI", 8, "bold"),
-                  bd=0, padx=6, pady=4, cursor="hand2").pack(side="bottom", padx=8, pady=(0,8))
         # right page — writing paper with lines
         right=tk.Frame(win, bg="#FFFCF7", bd=1, relief="solid")
         right.place(x=W//2+16, y=72, width=W//2-38, height=H-108)
@@ -4104,6 +4115,7 @@ class PetWindow:
                     else:
                         self._show_bubble("Need at least 6 characters, love", 3000)
         tk.Button(toolrow, text="🔒  lock", command=manage_lock, bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
+        tk.Button(toolrow, text="📊  insights", command=lambda: self._show_stats(win, data, dark=getattr(self,"_journal_dark_cur",False), on_day=lambda ds: _goto_date(ds)), bg="#EFE3CF", fg="#8B7355", activebackground="#E6D5B8", font=("Segoe UI", 8), bd=0, padx=8, pady=5, cursor="hand2").pack(side="left", padx=2)
         miscrow=tk.Frame(right, bg="#FFFCF7")
         miscrow.pack(side="bottom", fill="x", padx=8, pady=(0,2))
         def add_photo():
